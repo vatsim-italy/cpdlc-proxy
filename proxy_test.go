@@ -669,3 +669,32 @@ func TestParkNoRepeatedNotInUse(t *testing.T) {
 	r.pollHoppie()
 	r.expectSent("AZA1", "/data2/3/5/NE/"+unableNotInUse) // parked all the same
 }
+
+// Released to a tracker outside the FIR inside the grace: exit at once, never park first.
+func TestExitWithoutParking(t *testing.T) {
+	r := newRig(t)
+	r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.tick()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "||AZA1=LIMM_W_CTR")
+	r.tick()
+	r.expectSent("AZA1", "/data2/2//NE/ATC SERVICE TERMINATED", "/data2/3//NE/LOGOFF")
+	if r.sentCount() != 3 {
+		t.Fatal("parked before the exit")
+	}
+}
+
+// After HANDOVER to the next FIR the tracker is outside: wait for the pilot's LOGOFF.
+func TestNoExitAfterHandover(t *testing.T) {
+	r := newRig(t)
+	r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/2//NE/HANDOVER @LIMM")
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "||AZA1=LIMM_W_CTR")
+	r.tick()
+	if r.sentCount() != 2 {
+		t.Fatal("proxy uplinked after HANDOVER")
+	}
+}

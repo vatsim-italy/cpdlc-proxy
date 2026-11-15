@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	notInUse       = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED@_@DO NOT LOGOFF"
+	notInUse       = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED"
 	unableNotInUse = "UNABLE@_@CPDLC NOT IN USE. VOICE ONLY"
 	unavailable    = "CPDLC TEMPORARILY UNAVAILABLE. REVERT TO VOICE"
 )
@@ -208,10 +208,11 @@ func (st *Station) setAssumed(callsign string, assumed, next []string, trackers 
 	for a, tracker := range trackers {
 		c := st.conns[a]
 		switch {
-		case c == nil || !c.parked || tracker == "":
+		case c == nil || tracker == "" || c.handedOver: // after HANDOVER the pilot logs off itself
 		case st.inside(tracker):
 			c.insideAt = st.now()
-		default:
+		case !c.parked && st.served(a, c):
+		default: // left the FIR: exit now, not park first and exit on the next report
 			log.Printf("%s: %s tracked by %s, outside the FIR", st.name, a, tracker)
 			st.exit(a)
 		}

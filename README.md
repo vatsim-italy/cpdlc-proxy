@@ -44,6 +44,9 @@ In each sector's `settings.txt`:
 CPDLC_PROXY_URL=https://<CPDLC_PROXY_HOST>/
 ```
 
+Without the line the plugin uses `https://cpdlc.example.org/`. A `HOPPIE_URL`
+without `CPDLC_PROXY_URL` talks to that Hoppie server directly.
+
 Each controller keeps their own Hoppie logon code; the proxy only checks it.
 
 ## Updating

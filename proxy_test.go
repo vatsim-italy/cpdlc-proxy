@@ -651,3 +651,21 @@ func TestShortOutageDeliversRequests(t *testing.T) {
 	r.pollHoppie()
 	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/4//Y/REQUEST FL390")
 }
+
+// A flight the sector already told NOT IN USE (below the floor) is parked without a second one.
+func TestParkNoRepeatedNotInUse(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/2//NE/CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED")
+	r.tick()
+	advance(31 * time.Second)
+	r.tick()
+	if r.sentCount() != 2 {
+		t.Fatal("NOT IN USE repeated on park")
+	}
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/5//Y/REQUEST FL390")
+	r.pollHoppie()
+	r.expectSent("AZA1", "/data2/3/5/NE/"+unableNotInUse) // parked all the same
+}

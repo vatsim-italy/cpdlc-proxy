@@ -341,7 +341,9 @@ func (st *Station) acceptLogon(aircraft, min string) {
 }
 
 func (st *Station) park(aircraft string, c *conn) {
-	st.uplink(aircraft, "", notInUse)
+	if c.authorized { // already told NOT IN USE (e.g. below the floor): don't repeat it
+		st.uplink(aircraft, "", notInUse)
+	}
 	c.authorized, c.parked, c.parkedAt = false, true, st.now()
 	log.Printf("%s: %s parked", st.name, aircraft)
 }

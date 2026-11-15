@@ -1,0 +1,653 @@
+package main
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// fakeHoppie is tools/hoppie-sim/server.py in Go, with a set of valid logon codes.
+type fakeHoppie struct {
+	mu     sync.Mutex
+	valid  map[string]bool
+	queues map[string][]Message
+	sent   []Message // every cpdlc/telex, From = sender
+	sentTo []string
+	polls  int
+	pings  int
+	down   bool
+}
+
+func (f *fakeHoppie) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	from, to := strings.ToUpper(r.Form.Get("from")), strings.ToUpper(r.Form.Get("to"))
+	kind, pkt := r.Form.Get("type"), r.Form.Get("packet")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+		return
+	}
+	if kind == "ping" {
+		f.pings++
+	}
+	if !f.valid[r.Form.Get("logon")] {
+		_, _ = w.Write([]byte("error {illegal logon code}"))
+		return
+	}
+	switch kind {
+	case "poll":
+		f.polls++
+		_, _ = w.Write([]byte(formatPoll(f.queues[from])))
+		delete(f.queues, from)
+	case "cpdlc", "telex":
+		f.queues[to] = append(f.queues[to], Message{from, kind, pkt})
+		f.sent = append(f.sent, Message{from, kind, pkt})
+		f.sentTo = append(f.sentTo, to)
+		_, _ = w.Write([]byte("ok"))
+	default:
+		_, _ = w.Write([]byte("ok"))
+	}
+}
+
+// pilot sends a downlink straight to Hoppie, as EasyCPDLC would.
+func (f *fakeHoppie) pilot(from, to, pkt string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[to] = append(f.queues[to], Message{from, "cpdlc", pkt})
+}
+
+func (f *fakeHoppie) lastSent() (Message, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sent[len(f.sent)-1], f.sentTo[len(f.sentTo)-1]
+}
+
+type rig struct {
+	t      *testing.T
+	hoppie *fakeHoppie
+	proxy  *Proxy
+	url    string
+	cfg    Config
+	now    time.Time // frozen clock of proxy and station
+}
+
+func newRig(t *testing.T) *rig {
+	hoppie := &fakeHoppie{
+		valid:  map[string]bool{"PROXY": true, "CODE1": true, "CODE7": true, "CODE8": true},
+		queues: map[string][]Message{},
+	}
+	hs := httptest.NewServer(hoppie)
+	t.Cleanup(hs.Close)
+	r := &rig{t: t, hoppie: hoppie, now: time.Now()}
+	r.cfg.HoppieURL = hs.URL
+	r.cfg.Stations = []StationConfig{{Station: "LIRR", Facility: "ROMA CTR", Sectors: []string{"LIRR_*_CTR"}}}
+	r.start(filepath.Join(t.TempDir(), "state.json"))
+	ps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.proxy.ServeHTTP(w, req) }))
+	t.Cleanup(ps.Close)
+	r.url = ps.URL
+	return r
+}
+
+// start builds a fresh proxy on the state file, as a restarted process would.
+func (r *rig) start(statePath string) (restored int, err error) {
+	r.proxy = newProxy(r.cfg, "PROXY")
+	r.proxy.spacing = 0
+	r.proxy.statePath = statePath
+	r.proxy.now = func() time.Time { return r.now }
+	r.proxy.stations["LIRR"].now = r.proxy.now
+	return r.proxy.load()
+}
+
+func (r *rig) restart() {
+	r.t.Helper()
+	if err := r.proxy.save(); err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := r.start(r.proxy.statePath); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// sector makes one request to the proxy, as HoppieClient does.
+func (r *rig) sector(logon, from, to, kind, pkt string) string {
+	r.t.Helper()
+	resp, err := http.PostForm(r.url, url.Values{
+		"logon": {logon}, "from": {from}, "to": {to}, "type": {kind}, "packet": {pkt},
+	})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
+func (r *rig) pollHoppie() {
+	st := r.proxy.stations["LIRR"]
+	r.proxy.poll(st)
+	r.proxy.flush(st)
+}
+
+func (r *rig) inbox(logon, from string) []Message {
+	r.t.Helper()
+	messages, err := parsePoll(r.sector(logon, from, "SERVER", "poll", ""))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return messages
+}
+
+func expect(t *testing.T, got []Message, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want packets %v", got, want)
+	}
+	for i := range want {
+		if got[i].Packet != want[i] {
+			t.Fatalf("message %d: got %q, want %q", i, got[i].Packet, want[i])
+		}
+	}
+}
+
+func TestParsePoll(t *testing.T) {
+	got, err := parsePoll("ok {AZA1 cpdlc {/data2/3//Y/REQUEST DIRECT TO A/C}} {RYR2 telex {HELLO}}")
+	if err != nil || len(got) != 2 || got[0].From != "AZA1" || got[0].Packet != "/data2/3//Y/REQUEST DIRECT TO A/C" ||
+		got[1].Type != "telex" || got[1].Packet != "HELLO" {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if _, err := parsePoll("error {callsign already in use}"); err == nil {
+		t.Fatal("error reply accepted")
+	}
+	if got, _ := parsePoll("ok"); len(got) != 0 {
+		t.Fatalf("empty poll gave %v", got)
+	}
+	p, ok := parsePacket("/data2/12/3/WU/CLIMB TO @FL370@ A/B")
+	if !ok || p.String() != "/data2/12/3/WU/CLIMB TO @FL370@ A/B" || p.text != "CLIMB TO @FL370@ A/B" {
+		t.Fatalf("packet %v", p)
+	}
+}
+
+func TestAuthorization(t *testing.T) {
+	r := newRig(t)
+	if got := r.sector("CODE1", "LIMM_W_CTR", "SERVER", "poll", ""); !strings.Contains(got, "not authorized") {
+		t.Fatalf("other FIR: %q", got)
+	}
+	if got := r.sector("BAD", "LIRR_N_CTR", "SERVER", "poll", ""); got != "error {illegal logon code}" {
+		t.Fatalf("bad code: %q", got)
+	}
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "ok" {
+		t.Fatalf("good code: %q", got)
+	}
+	if got := r.sector("CODE7", "LIRR_N_CTR", "SERVER", "poll", ""); got != "error {callsign already in use}" {
+		t.Fatalf("second code on one callsign: %q", got)
+	}
+}
+
+func TestNoHoppiePollWithoutSectors(t *testing.T) {
+	r := newRig(t)
+	st := r.proxy.stations["LIRR"]
+	if st.duePoll() {
+		t.Fatal("polled with no sector connected")
+	}
+	r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", "")
+	if !st.duePoll() || st.duePoll() {
+		t.Fatal("want one poll now, then wait")
+	}
+}
+
+func TestRoutesToOwnerThenNext(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1 RYR2|BAW3")
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "|AZA1")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/1//Y/REQUEST FL370")
+	r.hoppie.pilot("BAW3", "LIRR", "/data2/1//Y/REQUEST LOGON")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/1//Y/REQUEST FL370", "/data2/1//Y/REQUEST LOGON")
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"))
+
+	// NE1 releases AZA1: its next sector NE8 gets it.
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "RYR2")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/2//Y/REQUEST FL390")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"), "/data2/2//Y/REQUEST FL390")
+}
+
+func TestMinRewriteAndReplyToSender(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "")
+
+	// Both sectors use local MIN 1; Hoppie must see two different MINs from LIRR.
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1//WU/CLIMB TO @FL370@")
+	first, to := r.hoppie.lastSent()
+	if first.From != "LIRR" || to != "AZA1" || first.Packet != "/data2/1//WU/CLIMB TO @FL370@" {
+		t.Fatalf("first uplink %v to %s", first, to)
+	}
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "AZA1") // internal transfer
+	r.sector("CODE8", "LIRR_NE8_CTR", "AZA1", "cpdlc", "/data2/1//WU/DESCEND TO @FL250@")
+	if second, _ := r.hoppie.lastSent(); second.Packet != "/data2/2//WU/DESCEND TO @FL250@" {
+		t.Fatalf("second uplink %v", second)
+	}
+
+	// The pilot answers both: each reply reaches the sector that sent it, with its own MIN.
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/5/1/N/WILCO")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/6/2/N/UNABLE")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/7//Y/REQUEST FL390")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/5/1/N/WILCO")
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"), "/data2/6/1/N/UNABLE", "/data2/7//Y/REQUEST FL390")
+}
+
+func TestUnownedLogonAcceptedByProxy(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.hoppie.pilot("DLH4", "LIRR", "/data2/7//Y/REQUEST LOGON")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
+	r.expectSent("DLH4", "/data2/1/7/NE/LOGON ACCEPTED", "/data2/2//NE/CURRENT ATC UNIT@_@LIRR@_@ROMA CTR",
+		"/data2/3//NE/"+notInUse)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "DLH4")
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "CONNECTED NOTAUTH")
+}
+
+// A FIR left unpolled for over logonMaxAge drops unowned logons from that batch, then accepts fresh ones.
+func TestOldUnownedLogonDropped(t *testing.T) {
+	r := newRig(t)
+	st, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.pollHoppie()
+	advance(logonMaxAge + time.Minute)
+	r.hoppie.pilot("DLH4", "LIRR", "/data2/7//Y/REQUEST LOGON")
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.pollHoppie()
+	r.hoppie.mu.Lock()
+	sent := len(r.hoppie.sent)
+	r.hoppie.mu.Unlock()
+	if sent != 0 || st.conns["DLH4"] != nil {
+		t.Fatalf("old logon answered: %d uplinks, conn %v", sent, st.conns["DLH4"])
+	}
+	advance(time.Minute)
+	r.hoppie.pilot("DLH4", "LIRR", "/data2/8//Y/REQUEST LOGON")
+	r.pollHoppie()
+	r.expectSent("DLH4", "/data2/1/8/NE/LOGON ACCEPTED", "/data2/2//NE/CURRENT ATC UNIT@_@LIRR@_@ROMA CTR",
+		"/data2/3//NE/"+notInUse)
+}
+
+// clock gives the station and a way to move the frozen time.
+func (r *rig) clock() (st *Station, advance func(time.Duration)) {
+	return r.proxy.stations["LIRR"], func(d time.Duration) { r.now = r.now.Add(d) }
+}
+
+func (r *rig) tick() {
+	st := r.proxy.stations["LIRR"]
+	st.prune()
+	r.proxy.flush(st)
+}
+
+// expectSent checks the last uplinks Hoppie got, oldest first.
+func (r *rig) expectSent(to string, want ...string) {
+	r.t.Helper()
+	r.hoppie.mu.Lock()
+	defer r.hoppie.mu.Unlock()
+	n := len(r.hoppie.sent)
+	if n < len(want) {
+		r.t.Fatalf("sent %v, want %v", r.hoppie.sent, want)
+	}
+	for i, w := range want {
+		m, dest := r.hoppie.sent[n-len(want)+i], r.hoppie.sentTo[n-len(want)+i]
+		if m.From != "LIRR" || dest != to || m.Packet != w {
+			r.t.Fatalf("uplink %d: %v to %s, want %q to %s", i, m, dest, w, to)
+		}
+	}
+}
+
+func (r *rig) sentCount() int {
+	r.hoppie.mu.Lock()
+	defer r.hoppie.mu.Unlock()
+	return len(r.hoppie.sent)
+}
+
+// NE1 -> NE7 (no CPDLC) -> NE8.
+func TestParkedAcrossNonCpdlcSector(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.tick()
+	advance(29 * time.Second)
+	r.tick()
+	if r.sentCount() != 1 {
+		t.Fatal("parked inside the grace")
+	}
+	advance(2 * time.Second)
+	r.tick()
+	r.expectSent("AZA1", "/data2/2//NE/"+notInUse)
+
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/5//Y/REQUEST FL390")
+	r.pollHoppie()
+	r.expectSent("AZA1", "/data2/3/5/NE/"+unableNotInUse)
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"))
+
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "AZA1")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/6//Y/REQUEST FL370")
+	r.pollHoppie()
+	got := r.inbox("CODE8", "LIRR_NE8_CTR")
+	expect(t, got, "CONNECTED NOTAUTH", "/data2/6//Y/REQUEST FL370")
+	if got[0].From != "AZA1" || got[0].Type != "vcp" {
+		t.Fatalf("adoption %v", got[0])
+	}
+	advance(time.Minute)
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "AZA1")
+	r.tick()
+	r.expectSent("AZA1", "/data2/3/5/NE/"+unableNotInUse) // nothing new
+}
+
+func TestInternalHandoffInsideGrace(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "")
+	r.tick()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.tick()
+	advance(20 * time.Second)
+	r.tick()
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "AZA1")
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"), "CONNECTED AUTH")
+	advance(20 * time.Second)
+	r.inbox("CODE8", "LIRR_NE8_CTR")
+	r.tick()
+	if r.sentCount() != 1 {
+		t.Fatal("NOT IN USE sent during an internal handoff")
+	}
+	// NE1 claims it back: it no longer knows the connection, so it is told again.
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "CONNECTED AUTH")
+}
+
+// NE1 hands AZA1 over to LIMM: the proxy waits for the pilot's LOGOFF and never parks it.
+func TestNoParkAfterHandover(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/2//WU/CONTACT @LIMM 135.455@_@MILANO CTR")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/3//NE/HANDOVER @LIMM")
+	r.tick()
+	sent := r.sentCount()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "") // tracked by LIMM now
+	r.tick()
+	advance(time.Minute)
+	r.tick()
+	if r.sentCount() != sent {
+		t.Fatal("parked after HANDOVER")
+	}
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/4//N/LOGOFF")
+	r.pollHoppie()
+	if st := r.proxy.stations["LIRR"]; st.conns["AZA1"] != nil {
+		t.Fatal("connection kept after the pilot's LOGOFF")
+	}
+}
+
+func parkedRig(t *testing.T) (*rig, func(time.Duration)) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE7", "LIRR_NE7_CTR", "", "assumed", "")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/1//Y/REQUEST LOGON")
+	r.pollHoppie()
+	r.expectSent("AZA1", "/data2/3//NE/"+notInUse)
+	return r, advance
+}
+
+func TestExitFromParked(t *testing.T) {
+	r, _ := parkedRig(t)
+	r.sector("CODE7", "LIRR_NE7_CTR", "", "assumed", "||AZA1=")
+	r.sector("CODE7", "LIRR_NE7_CTR", "", "assumed", "||AZA1=LIRR_NE7_CTR")
+	r.tick()
+	if r.sentCount() != 3 {
+		t.Fatal("exit with the tracker inside the FIR")
+	}
+	r.sector("CODE7", "LIRR_NE7_CTR", "", "assumed", "||AZA1=LIMM_W_CTR")
+	r.tick()
+	r.expectSent("AZA1", "/data2/4//NE/ATC SERVICE TERMINATED", "/data2/5//NE/LOGOFF")
+	if r.proxy.stations["LIRR"].conns["AZA1"] != nil {
+		t.Fatal("connection kept after exit")
+	}
+}
+
+func TestExitAfterParkedTimeout(t *testing.T) {
+	r, advance := parkedRig(t)
+	advance(20 * time.Minute)
+	r.sector("CODE7", "LIRR_NE7_CTR", "", "assumed", "||AZA1=LIRR_NE7_CTR")
+	advance(15 * time.Minute)
+	r.tick()
+	if r.sentCount() != 3 {
+		t.Fatal("exit despite a tracker inside the FIR")
+	}
+	advance(15 * time.Minute)
+	r.tick()
+	r.expectSent("AZA1", "/data2/4//NE/ATC SERVICE TERMINATED", "/data2/5//NE/LOGOFF")
+}
+
+func TestNextSectorNotUsedForConnected(t *testing.T) {
+	r, _ := parkedRig(t)
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "|AZA1")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/2//Y/REQUEST FL390")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"))
+	r.expectSent("AZA1", "/data2/4/2/NE/"+unableNotInUse)
+}
+
+func TestPollCarriesAssumed(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/1//Y/REQUEST LOGON") // the proxy accepts it
+	r.pollHoppie()
+	resp, err := http.PostForm(r.url, url.Values{
+		"logon": {"CODE1"}, "from": {"LIRR_NE1_CTR"}, "to": {"SERVER"}, "type": {"poll"}, "assumed": {"AZA1|"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got, _ := parsePoll(string(body))
+	expect(t, got, "CONNECTED NOTAUTH") // the claim is applied before the inbox is read
+}
+
+func TestHoppieDownReachesSectors(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	st := r.proxy.stations["LIRR"]
+	for i := 0; i < downAfter; i++ {
+		st.upstream(false)
+	}
+	if got := r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "poll", ""); got != "error {hoppie unreachable}" {
+		t.Fatalf("got %q", got)
+	}
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/1//Y/REQUEST FL370")
+	r.pollHoppie() // back
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/1//Y/REQUEST FL370")
+}
+
+func TestLogonCodeRevoked(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "ok" {
+		t.Fatalf("good code: %q", got)
+	}
+	r.hoppie.mu.Lock()
+	delete(r.hoppie.valid, "CODE1")
+	r.hoppie.mu.Unlock()
+	advance(4 * time.Minute)
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "ok" {
+		t.Fatalf("inside the cache: %q", got)
+	}
+	advance(2 * time.Minute)
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "error {illegal logon code}" {
+		t.Fatalf("after the cache: %q", got)
+	}
+}
+
+func TestBadLogonsDoNotFloodHoppie(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	pings := func() int {
+		r.hoppie.mu.Lock()
+		defer r.hoppie.mu.Unlock()
+		return r.hoppie.pings
+	}
+	for i := 0; i < 3; i++ {
+		if got := r.sector("BAD", "LIRR_N_CTR", "SERVER", "poll", ""); got != "error {illegal logon code}" {
+			t.Fatalf("bad code: %q", got)
+		}
+	}
+	if n := pings(); n != 1 {
+		t.Fatalf("a refused code was pinged %d times, want 1", n)
+	}
+	for i := 0; i < pingBurst; i++ {
+		r.sector("JUNK"+strconv.Itoa(i), "LIRR_N_CTR", "SERVER", "poll", "")
+	}
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "error {proxy busy, retry}" {
+		t.Fatalf("over the ping limit: %q", got)
+	}
+	if n := pings(); n != pingBurst {
+		t.Fatalf("%d pings in one window, want %d", n, pingBurst)
+	}
+	advance(badLogonCache) // also past pingWindow
+	if got := r.sector("CODE1", "LIRR_N_CTR", "SERVER", "poll", ""); got != "ok" {
+		t.Fatalf("next window: %q", got)
+	}
+	if n := len(r.proxy.logons); n != 1 {
+		t.Fatalf("%d cached checks, want only CODE1 once the junk expired", n)
+	}
+}
+
+func TestRestartKeepsConnections(t *testing.T) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/1/NE/LOGON ACCEPTED")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/5//WU/CLIMB TO @FL370@")
+	r.expectSent("AZA1", "/data2/1/1/NE/LOGON ACCEPTED", "/data2/2//WU/CLIMB TO @FL370@")
+	r.hoppie.pilot("DLH4", "LIRR", "/data2/1//Y/REQUEST LOGON") // no sector: parked
+	r.pollHoppie()
+	r.expectSent("DLH4", "/data2/3//NE/"+notInUse)
+
+	r.restart()
+	st := r.proxy.stations["LIRR"]
+	if c := st.conns["AZA1"]; c == nil || !c.authorized || c.parked || !c.known["LIRR_NE1_CTR"] {
+		t.Fatalf("AZA1 after restart: %+v", c)
+	}
+	if c := st.conns["DLH4"]; c == nil || !c.parked {
+		t.Fatalf("DLH4 after restart: %+v", c)
+	}
+
+	// NE8 takes AZA1 over; NE1 still gets the reply to its own uplink.
+	advance(5 * time.Second)
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "")
+	r.sector("CODE8", "LIRR_NE8_CTR", "", "assumed", "AZA1")
+	expect(t, r.inbox("CODE8", "LIRR_NE8_CTR"), "CONNECTED AUTH")
+	r.sector("CODE8", "LIRR_NE8_CTR", "AZA1", "cpdlc", "/data2/1//WU/DESCEND TO @FL250@")
+	r.expectSent("AZA1", "/data2/3//WU/DESCEND TO @FL250@") // continues, no collision with MIN 1 or 2
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/9/2/N/WILCO")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/9/5/N/WILCO")
+	r.tick()
+	if c := st.conns["DLH4"]; c == nil || !c.parked {
+		t.Fatal("parked flight lost on the first tick")
+	}
+}
+
+func TestCorruptStateStartsEmpty(t *testing.T) {
+	r := newRig(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"stations": {"LIRR": {"conns": [`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.start(path); err == nil {
+		t.Fatal("corrupt state accepted")
+	}
+	if len(r.proxy.stations["LIRR"].conns) != 0 {
+		t.Fatal("corrupt state partly applied")
+	}
+	if n, err := r.start(filepath.Join(t.TempDir(), "missing.json")); n != 0 || err != nil {
+		t.Fatalf("missing state: %d %v", n, err)
+	}
+}
+
+// staleRig has AZA1 with NE1, one uplink (station MIN 1) open and a successful poll behind it.
+func staleRig(t *testing.T) (*rig, func(time.Duration)) {
+	r := newRig(t)
+	_, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1//WU/CLIMB TO @FL370@")
+	r.pollHoppie()
+	return r, advance
+}
+
+func (r *rig) expectStaleHandled() {
+	r.t.Helper()
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/4//Y/REQUEST FL390")
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/5/1/N/WILCO")
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.pollHoppie()
+	expect(r.t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/5/1/N/WILCO")
+	r.expectSent("AZA1", "/data2/2/4/NE/"+unavailable)
+
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/6//Y/REQUEST FL370")
+	r.pollHoppie()
+	expect(r.t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/6//Y/REQUEST FL370")
+}
+
+func TestProxyDownStaleRequests(t *testing.T) {
+	r, advance := staleRig(t)
+	r.restart()
+	advance(10 * time.Minute)
+	r.expectStaleHandled()
+}
+
+func TestHoppieDownStaleRequests(t *testing.T) {
+	r, advance := staleRig(t)
+	r.hoppie.mu.Lock()
+	r.hoppie.down = true
+	r.hoppie.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		advance(50 * time.Second)
+		r.pollHoppie()
+	}
+	r.hoppie.mu.Lock()
+	r.hoppie.down = false
+	r.hoppie.mu.Unlock()
+	r.expectStaleHandled()
+}
+
+func TestShortOutageDeliversRequests(t *testing.T) {
+	r, advance := staleRig(t)
+	r.hoppie.mu.Lock()
+	r.hoppie.down = true
+	r.hoppie.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		advance(50 * time.Second)
+		r.pollHoppie()
+	}
+	r.hoppie.mu.Lock()
+	r.hoppie.down = false
+	r.hoppie.mu.Unlock()
+	advance(20 * time.Second)
+	r.hoppie.pilot("AZA1", "LIRR", "/data2/4//Y/REQUEST FL390")
+	r.sector("CODE1", "LIRR_NE1_CTR", "", "assumed", "AZA1")
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "/data2/4//Y/REQUEST FL390")
+}

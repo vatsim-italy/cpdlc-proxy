@@ -1,0 +1,8 @@
+*_test.go
+.env
+config.json
+data/
+*.state.json
+state.json
+README.md
+docker-compose.yml

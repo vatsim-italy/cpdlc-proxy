@@ -905,3 +905,119 @@ func TestPdcRelayFromWrongStation(t *testing.T) {
 		}
 	}
 }
+
+// sectorPdc sends a cpdlc uplink marked as an answer to a PDC request, as HoppieClient does.
+func (r *rig) sectorPdc(logon, from, to, pkt string) string {
+	r.t.Helper()
+	resp, err := http.PostForm(r.url, url.Values{
+		"logon": {logon}, "from": {from}, "to": {to}, "type": {"cpdlc"}, "packet": {pkt}, "pdc": {"1"},
+	})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
+func (f *fakeHoppie) sentTexts(to, prefix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for i, m := range f.sent {
+		if p, ok := parsePacket(m.Packet); ok && f.sentTo[i] == to && strings.HasPrefix(p.text, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestPdcAutoAckOncePerDelivery(t *testing.T) {
+	r := pdcRig(t)
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	if n := r.hoppie.sentTexts("AZA1", "DEPART MESSAGE REQUEST RECEIVED"); n != 1 {
+		t.Fatalf("%d acks for one request to two sectors", n)
+	}
+	m, _ := r.hoppie.lastSent()
+	if p, _ := parsePacket(m.Packet); m.From != "LIRF" || p.ra != "NE" || p.text != pdcReceived(r.now) {
+		t.Fatalf("ack %v", m)
+	}
+	// Refused requests get PDC NOT AVAILABLE only.
+	r.hoppie.telex("AZA2", "LIRF", "REQUEST PREDEP CLEARANCE AZA2 A320 TO LIRF AT LIMC")
+	r.pollStation("LIRF")
+	if n := r.hoppie.sentTexts("AZA2", "DEPART MESSAGE"); n != 0 {
+		t.Fatalf("ack to a refused request")
+	}
+}
+
+func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {
+	r := pdcRig(t)
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	r.inbox("CODE7", "LIRF_DEL")
+	r.inbox("CODE8", "LIRF_TWR")
+
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/5//R/@AZA1@ CLRD TO @LIMC@"); got != "ok" {
+		t.Fatalf("PDC: %s", got)
+	}
+	m, to := r.hoppie.lastSent()
+	sent, _ := parsePacket(m.Packet)
+	if m.From != "LIRF" || to != "AZA1" || sent.ra != "R" || sent.min == "5" {
+		t.Fatalf("PDC sent %v to %s", m, to)
+	}
+	if got := r.sectorPdc("CODE8", "LIRF_TWR", "AZA1", "/data2/9//R/@AZA1@ CLRD"); got != "error {pdc already sent by LIRF_DEL}" {
+		t.Fatalf("second PDC: %s", got)
+	}
+	expect(t, r.inbox("CODE8", "LIRF_TWR"), "PDC SENT BY LIRF_DEL")
+
+	r.hoppie.pilot("AZA1", "LIRF", "/data2/3/"+sent.min+"/N/ROGER")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), "/data2/3/5/N/ROGER")
+	expect(t, r.inbox("CODE8", "LIRF_TWR"))
+}
+
+func TestPdcMarkedWithoutRequestRefused(t *testing.T) {
+	r := pdcRig(t)
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/1//R/@AZA1@ CLRD"); got != "error {no pdc request pending}" {
+		t.Fatalf("PDC without request: %s", got)
+	}
+	r.hoppie.mu.Lock()
+	defer r.hoppie.mu.Unlock()
+	if len(r.hoppie.sent) != 0 {
+		t.Fatalf("sent %v", r.hoppie.sent)
+	}
+}
+
+// Regression: an unmarked uplink from the top-down CTR (its automatic LOGON ACCEPTED) to an
+// aircraft with a PDC pending neither takes the PDC nor goes out as the airport.
+func TestPdcTopDownUnmarkedCpdlcLeavesPdcAlone(t *testing.T) {
+	r := topDownRig(t)
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	r.inbox("CODE1", "LIRR_NE1_CTR")
+	r.inbox("CODE7", "LIRR_NE7_CTR")
+
+	if got := r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "cpdlc", "/data2/1/4/NE/LOGON ACCEPTED"); got != "ok" {
+		t.Fatalf("logon accepted: %s", got)
+	}
+	if m, _ := r.hoppie.lastSent(); m.From != "LIRR" {
+		t.Fatalf("LOGON ACCEPTED sent as %s", m.From)
+	}
+	expect(t, r.inbox("CODE7", "LIRR_NE7_CTR"))
+
+	if got := r.sectorPdc("CODE7", "LIRR_NE7_CTR", "AZA1", "/data2/8//R/@AZA1@ CLRD"); got != "ok" {
+		t.Fatalf("NE7 PDC: %s", got)
+	}
+	m, _ := r.hoppie.lastSent()
+	sent, _ := parsePacket(m.Packet)
+	if m.From != "LIRF" {
+		t.Fatalf("CTR PDC sent as %s", m.From)
+	}
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), "PDC SENT BY LIRR_NE7_CTR")
+
+	// The pilot's ROGER reaches LIRF and goes back to the CTR sector that sent the PDC.
+	r.hoppie.pilot("AZA1", "LIRF", "/data2/6/"+sent.min+"/N/ROGER")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRR_NE7_CTR"), "/data2/6/8/N/ROGER")
+}

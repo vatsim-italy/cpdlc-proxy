@@ -181,13 +181,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.ToUpper(strings.TrimSpace(r.Form.Get("to"))),
 		strings.ToLower(r.Form.Get("type")),
 		r.Form.Get("packet"),
+		r.Form.Get("pdc") == "1",
 	)
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte(reply))
 }
 
-// assumed is set when a poll carries the sector's flights (docs/cpdlc.md §14.3).
-func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string) string {
+// assumed is set when a poll carries the sector's flights (docs/cpdlc.md §14.3); pdc marks a
+// sector's answer to a PDC request (§14.10).
+func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string, pdc bool) string {
 	st := p.stationFor(from)
 	if st == nil {
 		return "error {callsign not authorized on this proxy}"
@@ -216,20 +218,23 @@ func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string) stri
 		st.setAssumedPacket(from, pkt)
 		return "ok"
 	case "cpdlc", "telex":
-		return p.send(st, from, to, kind, pkt)
+		return p.send(st, from, to, kind, pkt, pdc)
 	default:
 		return "error {unknown type " + kind + "}"
 	}
 }
 
-// send forwards an uplink as the station and returns Hoppie's own answer.
-func (p *Proxy) send(st *Station, from, to, kind, pkt string) string {
+// send forwards an uplink as the station and returns Hoppie's own answer. A telex, or a cpdlc
+// uplink the sector marked pdc, answering a pending PDC request takes it and goes out as the
+// airport station the pilot asked, even from its top-down CTR. Unmarked cpdlc uplinks never
+// touch a PDC: a CTR's LOGON ACCEPTED to an aircraft with a PDC pending stays its own.
+func (p *Proxy) send(st *Station, from, to, kind, pkt string, pdc bool) string {
 	if to == "" {
 		return "error {no recipient}"
 	}
 	as := st
-	if kind == "telex" {
-		// A PDC goes out as the airport station the pilot asked, even from its top-down CTR.
+	if kind == "telex" || pdc {
+		claimed := false
 		for _, airport := range p.stations {
 			if airport != st && airport.topDown != st {
 				continue
@@ -238,12 +243,17 @@ func (p *Proxy) send(st *Station, from, to, kind, pkt string) string {
 				if refused != "" {
 					return refused
 				}
-				as = airport
+				as, claimed = airport, true
 				break
 			}
 		}
+		if pdc && !claimed {
+			// Expired or lost in a restart: never send it as the sector's own station.
+			return "error {no pdc request pending}"
+		}
 	}
-	reply, err := p.sendAs(as, to, kind, st.rewriteUplink(from, to, kind, pkt))
+	// The MIN comes from the station it goes out as, so the pilot's reply finds its sector.
+	reply, err := p.sendAs(as, to, kind, as.rewriteUplink(from, to, kind, pkt))
 	if err != nil {
 		log.Printf("%s: send for %s to %s failed: %v", st.name, from, to, err)
 		return "error {hoppie unreachable}"

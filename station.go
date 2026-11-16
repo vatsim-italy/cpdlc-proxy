@@ -297,10 +297,14 @@ func (st *Station) route(m Message, oldLogons bool) {
 	// 1. A reply goes to the sector that sent the uplink, with that sector's own MIN.
 	if ok && p.mrn != "" {
 		if o, found := st.mins[m.From][p.mrn]; found {
+			reply := m
+			p.mrn = o.local
+			reply.Packet = p.String()
 			if s := st.sectors[o.sector]; st.live(s) {
-				p.mrn = o.local
-				m.Packet = p.String()
-				s.inbox = append(s.inbox, m)
+				s.inbox = append(s.inbox, reply)
+				return
+			}
+			if st.deliverTopDown(o.sector, reply) {
 				return
 			}
 		}
@@ -365,6 +369,7 @@ func (st *Station) routePdc(m Message) {
 	if ok && st.pdc && dep == st.name {
 		if st.broadcast(m, "") {
 			st.pdcs[m.From] = &pdcRequest{at: st.now(), to: st} // a repeat can be answered again
+			st.uplink(m.From, "", pdcReceived(st.now()))
 			return
 		}
 		if td := st.topDown; td != nil {
@@ -373,6 +378,7 @@ func (st *Station) routePdc(m Message) {
 			td.mu.Unlock()
 			if delivered {
 				st.pdcs[m.From] = &pdcRequest{at: st.now(), to: td}
+				st.uplink(m.From, "", pdcReceived(st.now()))
 				log.Printf("%s: PDC request from %s to top-down %s", st.name, m.From, td.name)
 				return
 			}
@@ -384,6 +390,30 @@ func (st *Station) routePdc(m Message) {
 	}
 	st.telex(m.From, reply)
 	log.Printf("%s: PDC request from %s, %s", st.name, m.From, reply)
+}
+
+// pdcReceived is the automatic answer to a delivered PDC request: once per request, from the
+// proxy, so it takes no lock and does not repeat per sector.
+func pdcReceived(now time.Time) string {
+	now = now.UTC()
+	return "DEPART MESSAGE REQUEST RECEIVED " + now.Format("1504") + "Z " + now.Format("020106") + " REQUEST BEING PROCESSED"
+}
+
+// deliverTopDown hands a reply to the top-down CTR sector that sent this airport's PDC; mu is
+// held (lock order: airport, then its top-down CTR).
+func (st *Station) deliverTopDown(sector string, m Message) bool {
+	td := st.topDown
+	if td == nil {
+		return false
+	}
+	td.mu.Lock()
+	defer td.mu.Unlock()
+	s := td.sectors[sector]
+	if !td.live(s) {
+		return false
+	}
+	s.inbox = append(s.inbox, m)
+	return true
 }
 
 // broadcast puts m in the inbox of every live sector but except; mu is held.
@@ -409,7 +439,7 @@ func (st *Station) hasLive() bool {
 	return false
 }
 
-// claimPdc lets one sector answer a PDC request pending at this airport station: a telex
+// claimPdc lets one sector answer a PDC request pending at this airport station: a PDC
 // from another sector to the same aircraft is refused, and the sectors that got the request
 // are told who sent it. The airport's own sectors always take part; its top-down CTR's only
 // for a request given to them. handled is false when sender has no PDC pending to aircraft.

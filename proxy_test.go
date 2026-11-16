@@ -731,7 +731,7 @@ func TestPdcNotAvailableForAnotherAirportOrBadFormat(t *testing.T) {
 	r := pdcRig(t)
 	for _, text := range []string{
 		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIMC STAND 107 ATIS B", // not LIRF's departure
-		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC",                          // malformed
+		"REQUEST PREDEP CLEARANCE AZA1 A320 AT LIRF",                          // malformed: no TO
 	} {
 		r.hoppie.telex("AZA1", "LIRF", text)
 		r.pollStation("LIRF")
@@ -743,9 +743,26 @@ func TestPdcNotAvailableForAnotherAirportOrBadFormat(t *testing.T) {
 }
 
 func TestPdcDeparture(t *testing.T) {
-	if got := pdcDeparture("request predep clearance  EJU56VC A320 TO EDDL AT LIMC STAND 107 ATIS B "); got != "LIMC" {
-		t.Fatalf("got %q", got)
+	for text, want := range map[string]string{
+		"request predep clearance  EJU56VC A320 TO EDDL AT LIMC STAND 107 ATIS B ": "LIMC",
+		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL AT LIMC":                    "LIMC",
+		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL ATIS B":                     "",
+		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL":                            "",
+	} {
+		if got, ok := pdcDeparture(text); !ok || got != want {
+			t.Fatalf("%q: got %q %v, want %q", text, got, ok, want)
+		}
 	}
+	if _, ok := pdcDeparture("REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL STAND"); ok {
+		t.Fatal("STAND without a value accepted")
+	}
+}
+
+func TestPdcWithoutAtDelivered(t *testing.T) {
+	r := pdcRig(t)
+	r.hoppie.telex("AZA1", "LIRF", "REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), "REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC")
 }
 
 func TestPdcNotAvailableOnCtrStation(t *testing.T) {

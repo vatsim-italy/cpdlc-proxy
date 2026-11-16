@@ -337,23 +337,25 @@ func isPdcRequest(m Message) bool {
 	return m.Type == "telex" && strings.Contains(strings.ToUpper(m.Packet), "PREDEP")
 }
 
-// REQUEST PREDEP CLEARANCE <CS> <TYPE> TO <DEST> AT <DEP> STAND <n> ATIS <x>
-var pdcFormat = regexp.MustCompile(`^REQUEST PREDEP CLEARANCE \S+ \S+ TO [A-Z]{4} AT ([A-Z]{4}) STAND \S+ ATIS [A-Z]$`)
+// REQUEST PREDEP CLEARANCE <CS> <TYPE> TO <DEST> [AT <DEP>] [STAND <n>] [ATIS <x>]
+var pdcFormat = regexp.MustCompile(`^REQUEST PREDEP CLEARANCE \S+ \S+ TO [A-Z]{4}(?: AT ([A-Z]{4}))?(?: STAND \S+)?(?: ATIS [A-Z])?$`)
 
-// pdcDeparture is the AT airport of a well-formed PDC request, or "".
-func pdcDeparture(text string) string {
-	if g := pdcFormat.FindStringSubmatch(strings.Join(strings.Fields(strings.ToUpper(text)), " ")); g != nil {
-		return g[1]
+// pdcDeparture parses a PDC request: ok when well formed, dep its AT airport ("" without one).
+func pdcDeparture(text string) (dep string, ok bool) {
+	g := pdcFormat.FindStringSubmatch(strings.Join(strings.Fields(strings.ToUpper(text)), " "))
+	if g == nil {
+		return "", false
 	}
-	return ""
+	return g[1], true
 }
 
-// routePdc gives a well-formed PDC request for this station's own airport to every live sector
+// routePdc gives a well-formed PDC request for this station's own airport (or with no AT) to every live sector
 // of a PDC station; they agree among themselves who answers, and claimPdc lets only the first
 // telex through. Anything else gets PDC NOT AVAILABLE. mu is held.
 func (st *Station) routePdc(m Message) {
 	delivered := false
-	if st.pdc && pdcDeparture(m.Packet) == st.name {
+	// Without AT the request is taken as for the airport it was sent to.
+	if dep, ok := pdcDeparture(m.Packet); st.pdc && ok && (dep == "" || dep == st.name) {
 		for _, s := range st.sectors {
 			if st.live(s) {
 				s.inbox = append(s.inbox, m)

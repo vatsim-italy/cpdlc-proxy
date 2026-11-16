@@ -835,3 +835,73 @@ func TestPollEvery40Seconds(t *testing.T) {
 		t.Fatal("poll not due at 40 s")
 	}
 }
+
+// topDownRig: LIRF answers PDCs, LIRR's CTR sectors cover it while it is empty; NE1 and NE7 online.
+func topDownRig(t *testing.T) *rig {
+	r := newRig(t)
+	r.cfg.Stations = append(r.cfg.Stations, StationConfig{Station: "LIRF", PDC: true, TopDown: "LIRR", Sectors: []string{"LIRF_DEL"}})
+	if _, err := r.start(""); err != nil {
+		t.Fatal(err)
+	}
+	r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "ping", "")
+	r.sector("CODE7", "LIRR_NE7_CTR", "SERVER", "ping", "")
+	return r
+}
+
+func TestPdcTopDownToCtrWhileAirportEmpty(t *testing.T) {
+	r := topDownRig(t)
+	if !r.proxy.stations["LIRF"].duePoll() {
+		t.Fatal("LIRF not polled with only its top-down CTR online")
+	}
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"), predep)
+	expect(t, r.inbox("CODE7", "LIRR_NE7_CTR"), predep)
+
+	if got := r.sector("CODE1", "LIRR_NE1_CTR", "AZA1", "telex", "PDC NE1"); got != "ok" {
+		t.Fatalf("CTR PDC: %s", got)
+	}
+	if m, to := r.hoppie.lastSent(); m.From != "LIRF" || to != "AZA1" {
+		t.Fatalf("CTR PDC sent as %s to %s, want LIRF", m.From, to)
+	}
+	if got := r.sector("CODE7", "LIRR_NE7_CTR", "AZA1", "telex", "PDC NE7"); got != "error {pdc already sent by LIRR_NE1_CTR}" {
+		t.Fatalf("second CTR PDC: %s", got)
+	}
+	expect(t, r.inbox("CODE7", "LIRR_NE7_CTR"), "PDC SENT BY LIRR_NE1_CTR")
+	// A CTR telex with no PDC pending goes out as LIRR, as before.
+	r.sector("CODE1", "LIRR_NE1_CTR", "BAW3", "telex", "HELLO")
+	if m, _ := r.hoppie.lastSent(); m.From != "LIRR" {
+		t.Fatalf("plain CTR telex sent as %s", m.From)
+	}
+
+	// LIRF_DEL comes online: new requests go to it only.
+	r.sector("CODE8", "LIRF_DEL", "SERVER", "ping", "")
+	r.hoppie.telex("AZA2", "LIRF", "REQUEST PREDEP CLEARANCE AZA2 A320 TO LIMC")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE8", "LIRF_DEL"), "REQUEST PREDEP CLEARANCE AZA2 A320 TO LIMC")
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
+	// The CTR cannot take a request given to LIRF's own sectors: its telex is a plain LIRR one.
+	r.sector("CODE1", "LIRR_NE1_CTR", "AZA2", "telex", "HELLO")
+	if m, _ := r.hoppie.lastSent(); m.From != "LIRR" {
+		t.Fatalf("CTR telex to AZA2 sent as %s", m.From)
+	}
+	if got := r.sector("CODE8", "LIRF_DEL", "AZA2", "telex", "PDC DEL"); got != "ok" {
+		t.Fatalf("DEL PDC: %s", got)
+	}
+}
+
+func TestPdcRelayFromWrongStation(t *testing.T) {
+	r := topDownRig(t)
+	for text, want := range map[string]string{
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A": pdcNotAvailable + ", RELAY RQST TO LIRF",
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC":                          pdcNotAvailable,
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIBD":                  pdcNotAvailable, // not a PDC airport here
+	} {
+		r.hoppie.telex("AZA1", "LIRR", text)
+		r.pollHoppie()
+		expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
+		if m, to := r.hoppie.lastSent(); m.From != "LIRR" || to != "AZA1" || m.Packet != want {
+			t.Fatalf("%q: sent %v to %s, want %q", text, m, to, want)
+		}
+	}
+}

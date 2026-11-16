@@ -67,15 +67,18 @@ type outgoing struct {
 // whose telex answered it first (§14.10).
 type pdcRequest struct {
 	at time.Time
+	to *Station // whose sectors got it: the airport's own, or its top-down CTR's
 	by string
 }
 
 type Station struct {
 	name        string
-	facility    string   // CURRENT ATC UNIT text of the proxy's own logon answer
-	pdc         bool     // its sectors answer PDC requests; otherwise the proxy answers PDC NOT AVAILABLE
-	patterns    []string // sector callsigns of this FIR
-	pollSeconds int      // > 0: fixed interval (tests, local simulator); 0: pollInterval
+	facility    string          // CURRENT ATC UNIT text of the proxy's own logon answer
+	pdc         bool            // its sectors answer PDC requests; otherwise the proxy answers PDC NOT AVAILABLE
+	topDown     *Station        // PDC station: whose sectors answer its PDCs while none of its own is live
+	pdcAirports map[string]bool // every PDC station of the proxy, for RELAY RQST TO
+	patterns    []string        // sector callsigns of this FIR
+	pollSeconds int             // > 0: fixed interval (tests, local simulator); 0: pollInterval
 	staleAfter  time.Duration
 	now         func() time.Time
 
@@ -349,48 +352,88 @@ func pdcDeparture(text string) (dep string, ok bool) {
 	return g[1], true
 }
 
-// routePdc gives a well-formed PDC request for this station's own airport (or with no AT) to every live sector
-// of a PDC station; they agree among themselves who answers, and claimPdc lets only the first
-// telex through. Anything else gets PDC NOT AVAILABLE. mu is held.
+// routePdc gives a well-formed PDC request for this station's own airport (no AT counts as
+// this airport) to every live sector of the PDC station or, with none live, of its top-down
+// CTR; they agree among themselves who answers, and claimPdc lets only the first telex
+// through. Anything else gets PDC NOT AVAILABLE, with RELAY RQST TO when AT names another
+// PDC airport. mu is held; lock order is airport, then its top-down CTR.
 func (st *Station) routePdc(m Message) {
-	delivered := false
-	// Without AT the request is taken as for the airport it was sent to.
-	if dep, ok := pdcDeparture(m.Packet); st.pdc && ok && (dep == "" || dep == st.name) {
-		for _, s := range st.sectors {
-			if st.live(s) {
-				s.inbox = append(s.inbox, m)
-				delivered = true
+	dep, ok := pdcDeparture(m.Packet)
+	if dep == "" {
+		dep = st.name
+	}
+	if ok && st.pdc && dep == st.name {
+		if st.broadcast(m, "") {
+			st.pdcs[m.From] = &pdcRequest{at: st.now(), to: st} // a repeat can be answered again
+			return
+		}
+		if td := st.topDown; td != nil {
+			td.mu.Lock()
+			delivered := td.broadcast(m, "")
+			td.mu.Unlock()
+			if delivered {
+				st.pdcs[m.From] = &pdcRequest{at: st.now(), to: td}
+				log.Printf("%s: PDC request from %s to top-down %s", st.name, m.From, td.name)
+				return
 			}
 		}
 	}
-	if !delivered {
-		st.telex(m.From, pdcNotAvailable)
-		log.Printf("%s: PDC request from %s, %s", st.name, m.From, pdcNotAvailable)
-		return
+	reply := pdcNotAvailable
+	if ok && dep != st.name && st.pdcAirports[dep] {
+		reply += ", RELAY RQST TO " + dep
 	}
-	st.pdcs[m.From] = &pdcRequest{at: st.now()} // a repeated request can be answered again
+	st.telex(m.From, reply)
+	log.Printf("%s: PDC request from %s, %s", st.name, m.From, reply)
 }
 
-// claimPdc lets one sector answer a pending PDC request: a telex from another sector to the
-// same aircraft is refused, and the others are told who sent it.
-func (st *Station) claimPdc(callsign, aircraft string) string {
+// broadcast puts m in the inbox of every live sector but except; mu is held.
+func (st *Station) broadcast(m Message, except string) bool {
+	delivered := false
+	for cs, s := range st.sectors {
+		if cs != except && st.live(s) {
+			s.inbox = append(s.inbox, m)
+			delivered = true
+		}
+	}
+	return delivered
+}
+
+func (st *Station) hasLive() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, s := range st.sectors {
+		if st.live(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// claimPdc lets one sector answer a PDC request pending at this airport station: a telex
+// from another sector to the same aircraft is refused, and the sectors that got the request
+// are told who sent it. The airport's own sectors always take part; its top-down CTR's only
+// for a request given to them. handled is false when sender has no PDC pending to aircraft.
+func (st *Station) claimPdc(sender *Station, callsign, aircraft string) (handled bool, refused string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	r := st.pdcs[aircraft]
 	switch {
-	case r == nil || r.by == callsign:
-		return ""
+	case r == nil || (sender != st && sender != r.to):
+		return false, ""
+	case r.by == callsign:
+		return true, ""
 	case r.by != "":
-		return "error {pdc already sent by " + r.by + "}"
+		return true, "error {pdc already sent by " + r.by + "}"
 	}
 	r.by = callsign
-	for cs, s := range st.sectors {
-		if cs != callsign && st.live(s) {
-			s.inbox = append(s.inbox, Message{From: aircraft, Type: "vcp", Packet: "PDC SENT BY " + callsign})
-		}
+	sent := Message{From: aircraft, Type: "vcp", Packet: "PDC SENT BY " + callsign}
+	if r.to != st {
+		r.to.mu.Lock()
+		defer r.to.mu.Unlock()
 	}
+	r.to.broadcast(sent, callsign)
 	log.Printf("%s: PDC for %s sent by %s", st.name, aircraft, callsign)
-	return ""
+	return true, ""
 }
 
 // answerStale answers a pilot request queued during an outage instead of delivering it.
@@ -512,6 +555,10 @@ func (st *Station) duePoll() bool {
 	anyLive := false
 	for _, s := range st.sectors {
 		anyLive = anyLive || st.live(s)
+	}
+	// A PDC airport is also polled for its top-down CTR (lock order: airport, then CTR).
+	if !anyLive && st.topDown != nil {
+		anyLive = st.topDown.hasLive()
 	}
 	if !anyLive {
 		return false

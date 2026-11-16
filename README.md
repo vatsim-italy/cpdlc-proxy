@@ -24,8 +24,9 @@ Only three files live on the VPS: `docker-compose.yml`, `config.json`, `.env`.
 1. Copy `docker-compose.yml`, `config.example.json` and `.env.example` to the VPS.
 2. `cp config.example.json config.json`, then edit `stations`: one entry per FIR
    with its Hoppie `station`, `facility` name and the sector callsign patterns.
-   Airports that answer PDC requests (`LIRF`, `LIMC`) get `"pdc": true`
-   (docs/cpdlc.md §14.10).
+   Airports that answer PDC requests (`LIRF`, `LIMC`) get `"pdc": true`, and
+   `"top_down"` names the CTR station that answers their PDCs while they are
+   empty (docs/cpdlc.md §14.10).
 3. `cp .env.example .env`, then fill in:
    - `HOPPIE_LOGON`: the proxy's own Hoppie logon code.
    - `CPDLC_PROXY_HOST`: the public host name (DNS must point to the VPS).

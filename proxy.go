@@ -30,6 +30,7 @@ type StationConfig struct {
 	Station  string   `json:"station"`
 	Facility string   `json:"facility"` // CURRENT ATC UNIT name, e.g. "ROMA CTR"; empty: the station
 	PDC      bool     `json:"pdc"`      // sectors answer PDC requests (an airport, e.g. LIRF)
+	TopDown  string   `json:"top_down"` // PDC station: the CTR station answering its PDCs while it is empty
 	Sectors  []string `json:"sectors"`  // callsign patterns, e.g. "LIRR_*CTR"
 }
 
@@ -81,6 +82,26 @@ func newProxy(cfg Config, logon string) *Proxy {
 		for _, g := range s.Sectors {
 			st.patterns = append(st.patterns, strings.ToUpper(g))
 			p.patterns = append(p.patterns, pattern{strings.ToUpper(g), st})
+		}
+	}
+	airports := map[string]bool{}
+	for _, s := range cfg.Stations {
+		st := p.stations[strings.ToUpper(s.Station)]
+		st.pdcAirports = airports
+		if s.PDC {
+			airports[st.name] = true
+		}
+	}
+	for _, s := range cfg.Stations {
+		if s.TopDown == "" {
+			continue
+		}
+		st := p.stations[strings.ToUpper(s.Station)]
+		// Only airport -> CTR: a chain would break the airport-then-CTR lock order.
+		if td := p.stations[strings.ToUpper(s.TopDown)]; td != nil && st.pdc && !td.pdc {
+			st.topDown = td
+		} else {
+			log.Printf("%s: top_down %q is not a CTR station of this proxy, ignored", st.name, s.TopDown)
 		}
 	}
 	return p
@@ -206,12 +227,23 @@ func (p *Proxy) send(st *Station, from, to, kind, pkt string) string {
 	if to == "" {
 		return "error {no recipient}"
 	}
+	as := st
 	if kind == "telex" {
-		if refused := st.claimPdc(from, to); refused != "" {
-			return refused
+		// A PDC goes out as the airport station the pilot asked, even from its top-down CTR.
+		for _, airport := range p.stations {
+			if airport != st && airport.topDown != st {
+				continue
+			}
+			if handled, refused := airport.claimPdc(st, from, to); handled {
+				if refused != "" {
+					return refused
+				}
+				as = airport
+				break
+			}
 		}
 	}
-	reply, err := p.sendAs(st, to, kind, st.rewriteUplink(from, to, kind, pkt))
+	reply, err := p.sendAs(as, to, kind, st.rewriteUplink(from, to, kind, pkt))
 	if err != nil {
 		log.Printf("%s: send for %s to %s failed: %v", st.name, from, to, err)
 		return "error {hoppie unreachable}"

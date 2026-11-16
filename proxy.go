@@ -29,6 +29,7 @@ type Config struct {
 type StationConfig struct {
 	Station  string   `json:"station"`
 	Facility string   `json:"facility"` // CURRENT ATC UNIT name, e.g. "ROMA CTR"; empty: the station
+	PDC      bool     `json:"pdc"`      // sectors answer PDC requests (an airport, e.g. LIRF)
 	Sectors  []string `json:"sectors"`  // callsign patterns, e.g. "LIRR_*CTR"
 }
 
@@ -72,6 +73,7 @@ func newProxy(cfg Config, logon string) *Proxy {
 		name := strings.ToUpper(s.Station)
 		st := newStation(name, cfg.PollSeconds)
 		st.facility = s.Facility
+		st.pdc = s.PDC
 		if cfg.StaleSecs > 0 {
 			st.staleAfter = time.Duration(cfg.StaleSecs) * time.Second
 		}
@@ -204,6 +206,11 @@ func (p *Proxy) send(st *Station, from, to, kind, pkt string) string {
 	if to == "" {
 		return "error {no recipient}"
 	}
+	if kind == "telex" {
+		if refused := st.claimPdc(from, to); refused != "" {
+			return refused
+		}
+	}
 	reply, err := p.sendAs(st, to, kind, st.rewriteUplink(from, to, kind, pkt))
 	if err != nil {
 		log.Printf("%s: send for %s to %s failed: %v", st.name, from, to, err)
@@ -238,7 +245,7 @@ func (p *Proxy) flushAsync(st *Station) {
 // flush sends the station's own uplinks (notices, automatic answers, logoffs).
 func (p *Proxy) flush(st *Station) {
 	for _, u := range st.takeOutbox() {
-		if reply, err := p.sendAs(st, u.to, "cpdlc", u.packet); err != nil || !strings.HasPrefix(reply, "ok") {
+		if reply, err := p.sendAs(st, u.to, u.kind, u.packet); err != nil || !strings.HasPrefix(reply, "ok") {
 			log.Printf("%s: proxy uplink %s to %s failed: %v %s", st.name, u.packet, u.to, err, reply)
 		}
 	}

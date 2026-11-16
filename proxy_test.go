@@ -103,7 +103,9 @@ func (r *rig) start(statePath string) (restored int, err error) {
 	r.proxy.spacing = 0
 	r.proxy.statePath = statePath
 	r.proxy.now = func() time.Time { return r.now }
-	r.proxy.stations["LIRR"].now = r.proxy.now
+	for _, st := range r.proxy.stations {
+		st.now = r.proxy.now
+	}
 	return r.proxy.load()
 }
 
@@ -696,5 +698,102 @@ func TestNoExitAfterHandover(t *testing.T) {
 	r.tick()
 	if r.sentCount() != 2 {
 		t.Fatal("proxy uplinked after HANDOVER")
+	}
+}
+
+// pdcRig adds LIRF, a PDC station, with DEL and TWR connected.
+func pdcRig(t *testing.T) *rig {
+	r := newRig(t)
+	r.cfg.Stations = append(r.cfg.Stations, StationConfig{Station: "LIRF", PDC: true, Sectors: []string{"LIRF_DEL", "LIRF_TWR"}})
+	if _, err := r.start(""); err != nil {
+		t.Fatal(err)
+	}
+	r.sector("CODE7", "LIRF_DEL", "SERVER", "ping", "")
+	r.sector("CODE8", "LIRF_TWR", "SERVER", "ping", "")
+	return r
+}
+
+func (r *rig) pollStation(name string) {
+	st := r.proxy.stations[name]
+	r.proxy.poll(st)
+	r.proxy.flush(st)
+}
+
+func (f *fakeHoppie) telex(from, to, text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[to] = append(f.queues[to], Message{from, "telex", text})
+}
+
+const predep = "REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A"
+
+func TestPdcNotAvailableOnCtrStation(t *testing.T) {
+	r := newRig(t)
+	r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "ping", "")
+	r.hoppie.telex("AZA1", "LIRR", predep)
+	r.pollHoppie()
+	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
+	m, to := r.hoppie.lastSent()
+	if m.From != "LIRR" || m.Type != "telex" || to != "AZA1" || m.Packet != pdcNotAvailable {
+		t.Fatalf("sent %v to %s", m, to)
+	}
+}
+
+func TestPdcToEverySectorFirstAnswerWins(t *testing.T) {
+	r := pdcRig(t)
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), predep)
+	expect(t, r.inbox("CODE8", "LIRF_TWR"), predep)
+
+	if got := r.sector("CODE8", "LIRF_TWR", "AZA1", "telex", "PDC TWR"); got != "ok" {
+		t.Fatalf("first PDC: %s", got)
+	}
+	if got := r.sector("CODE7", "LIRF_DEL", "AZA1", "telex", "PDC DEL"); got != "error {pdc already sent by LIRF_TWR}" {
+		t.Fatalf("second PDC: %s", got)
+	}
+	if got := r.sector("CODE8", "LIRF_TWR", "AZA1", "telex", "PDC TWR AGAIN"); got != "ok" {
+		t.Fatalf("resend by the claimer: %s", got)
+	}
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), "PDC SENT BY LIRF_TWR")
+	expect(t, r.inbox("CODE8", "LIRF_TWR"))
+
+	// The pilot asks again: the request is open to every sector once more.
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	if got := r.sector("CODE7", "LIRF_DEL", "AZA1", "telex", "PDC DEL"); got != "ok" {
+		t.Fatalf("PDC after a new request: %s", got)
+	}
+}
+
+func TestPdcStaleAfterGapNotAvailable(t *testing.T) {
+	r := pdcRig(t)
+	r.pollStation("LIRF")
+	r.now = r.now.Add(10 * time.Minute)
+	r.sector("CODE7", "LIRF_DEL", "SERVER", "ping", "")
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"))
+	m, to := r.hoppie.lastSent()
+	if m.From != "LIRF" || to != "AZA1" || m.Packet != pdcNotAvailable {
+		t.Fatalf("sent %v to %s", m, to)
+	}
+}
+
+func TestPollEvery40Seconds(t *testing.T) {
+	r := newRig(t)
+	st, advance := r.clock()
+	r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "ping", "")
+	if !st.duePoll() {
+		t.Fatal("first poll not due")
+	}
+	advance(39 * time.Second)
+	if st.duePoll() {
+		t.Fatal("poll due before 40 s")
+	}
+	advance(time.Second)
+	r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "ping", "")
+	if !st.duePoll() {
+		t.Fatal("poll not due at 40 s")
 	}
 }

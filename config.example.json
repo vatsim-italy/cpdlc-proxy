@@ -2,6 +2,8 @@
   "hoppie_url": "https://www.hoppie.nl/acars/system/connect.html",
   "stations": [
     { "station": "LIRR", "facility": "ROMA CTR", "sectors": ["LIRR_CTR", "LIRR_*_CTR"] },
-    { "station": "LIMM", "facility": "MILANO CTR", "sectors": ["LIMM_CTR", "LIMM_*_CTR"] }
+    { "station": "LIMM", "facility": "MILANO CTR", "sectors": ["LIMM_CTR", "LIMM_*_CTR"] },
+    { "station": "LIRF", "pdc": true, "sectors": ["LIRF_DEL", "LIRF_GND", "LIRF_TWR"] },
+    { "station": "LIMC", "pdc": true, "sectors": ["LIMC_DEL", "LIMC_GND", "LIMC_TWR"] }
   ]
 }

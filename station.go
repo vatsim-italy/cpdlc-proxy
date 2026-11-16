@@ -4,7 +4,6 @@ package main
 
 import (
 	"log"
-	"math/rand"
 	"path"
 	"strconv"
 	"strings"
@@ -14,9 +13,10 @@ import (
 )
 
 const (
-	notInUse       = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED"
-	unableNotInUse = "UNABLE@_@CPDLC NOT IN USE. VOICE ONLY"
-	unavailable    = "CPDLC TEMPORARILY UNAVAILABLE. REVERT TO VOICE"
+	notInUse        = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED"
+	unableNotInUse  = "UNABLE@_@CPDLC NOT IN USE. VOICE ONLY"
+	unavailable     = "CPDLC TEMPORARILY UNAVAILABLE. REVERT TO VOICE"
+	pdcNotAvailable = "PDC NOT AVAILABLE"
 )
 
 const (
@@ -30,6 +30,8 @@ const (
 	fastWindow    = 180 * time.Second // T_resp: an uplink waiting for a reply keeps polling fast
 	staleAfter    = 180 * time.Second // T_resp: requests queued longer than this are stale
 	logonMaxAge   = 10 * time.Minute  // a logon possibly queued longer: its pilot has likely left
+	pollInterval  = 40 * time.Second  // fixed, under Hoppie's 45–75 s since the proxy polls for several callsigns
+	pdcExpiry     = 30 * time.Minute  // a PDC request is forgotten after this long
 )
 
 type sector struct {
@@ -57,24 +59,34 @@ type conn struct {
 }
 
 type outgoing struct {
-	to, packet string
+	to, kind, packet string
+}
+
+// pdcRequest is a PREDEP CLEARANCE given to every sector of a PDC station; by is the sector
+// whose telex answered it first (§14.10).
+type pdcRequest struct {
+	at time.Time
+	by string
 }
 
 type Station struct {
 	name        string
 	facility    string   // CURRENT ATC UNIT text of the proxy's own logon answer
+	pdc         bool     // its sectors answer PDC requests; otherwise the proxy answers PDC NOT AVAILABLE
 	patterns    []string // sector callsigns of this FIR
-	pollSeconds int      // > 0: fixed interval (tests, local simulator); 0: Hoppie's 45–75 s
+	pollSeconds int      // > 0: fixed interval (tests, local simulator); 0: pollInterval
 	staleAfter  time.Duration
 	now         func() time.Time
 
-	mu         sync.Mutex
-	sectors    map[string]*sector
-	owner      map[string]string // aircraft -> sector that assumed it
-	nextOf     map[string]string // aircraft -> coordinated next sector
-	counter    map[string]int    // aircraft -> last MIN sent to it
-	mins       map[string]map[string]origin
-	conns      map[string]*conn
+	mu      sync.Mutex
+	sectors map[string]*sector
+	owner   map[string]string // aircraft -> sector that assumed it
+	nextOf  map[string]string // aircraft -> coordinated next sector
+	counter map[string]int    // aircraft -> last MIN sent to it
+	mins    map[string]map[string]origin
+	conns   map[string]*conn
+	// shortcut: not saved, a proxy restart loses who sent a pending PDC; persist it if that ever matters.
+	pdcs       map[string]*pdcRequest
 	outbox     []outgoing // proxy uplinks, sent by Proxy outside mu
 	lastUplink time.Time
 	polled     time.Time
@@ -99,6 +111,7 @@ func newStation(name string, pollSeconds int) *Station {
 		counter:     map[string]int{},
 		mins:        map[string]map[string]origin{},
 		conns:       map[string]*conn{},
+		pdcs:        map[string]*pdcRequest{},
 	}
 }
 
@@ -263,6 +276,10 @@ func (st *Station) adopt(callsign, aircraft string, c *conn) {
 func (st *Station) route(m Message, oldLogons bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if isPdcRequest(m) {
+		st.routePdc(m)
+		return
+	}
 	p, ok := parsePacket(m.Packet)
 	ok = ok && m.Type == "cpdlc"
 	c := st.conns[m.From]
@@ -315,8 +332,60 @@ func (st *Station) route(m Message, oldLogons bool) {
 	log.Printf("%s: no sector for %s, dropped %s %s", st.name, m.From, m.Type, m.Packet)
 }
 
+func isPdcRequest(m Message) bool {
+	return m.Type == "telex" && strings.Contains(strings.ToUpper(m.Packet), "PREDEP")
+}
+
+// routePdc gives a PDC request to every live sector of a PDC station; they agree among
+// themselves who answers, and claimPdc lets only the first telex through. mu is held.
+func (st *Station) routePdc(m Message) {
+	delivered := false
+	if st.pdc {
+		for _, s := range st.sectors {
+			if st.live(s) {
+				s.inbox = append(s.inbox, m)
+				delivered = true
+			}
+		}
+	}
+	if !delivered {
+		st.telex(m.From, pdcNotAvailable)
+		log.Printf("%s: PDC request from %s, %s", st.name, m.From, pdcNotAvailable)
+		return
+	}
+	st.pdcs[m.From] = &pdcRequest{at: st.now()} // a repeated request can be answered again
+}
+
+// claimPdc lets one sector answer a pending PDC request: a telex from another sector to the
+// same aircraft is refused, and the others are told who sent it.
+func (st *Station) claimPdc(callsign, aircraft string) string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	r := st.pdcs[aircraft]
+	switch {
+	case r == nil || r.by == callsign:
+		return ""
+	case r.by != "":
+		return "error {pdc already sent by " + r.by + "}"
+	}
+	r.by = callsign
+	for cs, s := range st.sectors {
+		if cs != callsign && st.live(s) {
+			s.inbox = append(s.inbox, Message{From: aircraft, Type: "vcp", Packet: "PDC SENT BY " + callsign})
+		}
+	}
+	log.Printf("%s: PDC for %s sent by %s", st.name, aircraft, callsign)
+	return ""
+}
+
 // answerStale answers a pilot request queued during an outage instead of delivering it.
 func (st *Station) answerStale(m Message) bool {
+	if isPdcRequest(m) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		st.telex(m.From, pdcNotAvailable)
+		return true
+	}
 	p, ok := parsePacket(m.Packet)
 	if m.Type != "cpdlc" || !ok || !p.request() || p.logonOrOff() {
 		return false
@@ -359,7 +428,12 @@ func (st *Station) exit(aircraft string) {
 // uplink queues a proxy message to an aircraft; mu is held.
 func (st *Station) uplink(to, mrn, text string) {
 	min := st.nextMin(to, origin{at: st.now()})
-	st.outbox = append(st.outbox, outgoing{to, packet{min, mrn, "NE", text}.String()})
+	st.outbox = append(st.outbox, outgoing{to, "cpdlc", packet{min, mrn, "NE", text}.String()})
+}
+
+// telex queues a proxy free-text telex to an aircraft; mu is held.
+func (st *Station) telex(to, text string) {
+	st.outbox = append(st.outbox, outgoing{to, "telex", text})
 }
 
 // rewriteUplink gives an uplink a MIN unique for this station and aircraft.
@@ -431,7 +505,7 @@ func (st *Station) duePoll() bool {
 	if now.Before(st.nextPoll) && !(fast && now.Sub(st.polled) >= fastPoll) {
 		return false
 	}
-	interval := time.Duration(45+rand.Intn(31)) * time.Second
+	interval := pollInterval
 	if st.pollSeconds > 0 {
 		interval = time.Duration(st.pollSeconds) * time.Second
 	}
@@ -475,6 +549,11 @@ func (st *Station) prune() {
 			c.ownerLostAt = now
 		case now.Sub(c.ownerLostAt) >= parkGrace:
 			st.park(a, c)
+		}
+	}
+	for a, r := range st.pdcs {
+		if now.Sub(r.at) > pdcExpiry {
+			delete(st.pdcs, a)
 		}
 	}
 	for aircraft, sent := range st.mins {

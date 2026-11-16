@@ -727,6 +727,27 @@ func (f *fakeHoppie) telex(from, to, text string) {
 
 const predep = "REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A"
 
+func TestPdcNotAvailableForAnotherAirportOrBadFormat(t *testing.T) {
+	r := pdcRig(t)
+	for _, text := range []string{
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIMC STAND 107 ATIS B", // not LIRF's departure
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC",                          // malformed
+	} {
+		r.hoppie.telex("AZA1", "LIRF", text)
+		r.pollStation("LIRF")
+		expect(t, r.inbox("CODE7", "LIRF_DEL"))
+		if m, to := r.hoppie.lastSent(); to != "AZA1" || m.Packet != pdcNotAvailable {
+			t.Fatalf("%q: sent %v to %s", text, m, to)
+		}
+	}
+}
+
+func TestPdcDeparture(t *testing.T) {
+	if got := pdcDeparture("request predep clearance  EJU56VC A320 TO EDDL AT LIMC STAND 107 ATIS B "); got != "LIMC" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestPdcNotAvailableOnCtrStation(t *testing.T) {
 	r := newRig(t)
 	r.sector("CODE1", "LIRR_NE1_CTR", "SERVER", "ping", "")

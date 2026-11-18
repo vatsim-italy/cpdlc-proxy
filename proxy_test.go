@@ -719,6 +719,16 @@ func (r *rig) pollStation(name string) {
 	r.proxy.flush(st)
 }
 
+// pdcAnswer is the text of a proxy PDC refusal, sent as CPDLC with RA NE.
+func pdcAnswer(t *testing.T, m Message) string {
+	t.Helper()
+	p, ok := parsePacket(m.Packet)
+	if !ok || p.ra != "NE" {
+		t.Fatalf("not a CPDLC NE uplink: %v", m)
+	}
+	return p.text
+}
+
 func (f *fakeHoppie) telex(from, to, text string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -736,7 +746,7 @@ func TestPdcNotAvailableForAnotherAirportOrBadFormat(t *testing.T) {
 		r.hoppie.telex("AZA1", "LIRF", text)
 		r.pollStation("LIRF")
 		expect(t, r.inbox("CODE7", "LIRF_DEL"))
-		if m, to := r.hoppie.lastSent(); to != "AZA1" || m.Packet != pdcNotAvailable {
+		if m, to := r.hoppie.lastSent(); to != "AZA1" || m.Type != "cpdlc" || pdcAnswer(t, m) != pdcNotAvailable {
 			t.Fatalf("%q: sent %v to %s", text, m, to)
 		}
 	}
@@ -772,7 +782,7 @@ func TestPdcNotAvailableOnCtrStation(t *testing.T) {
 	r.pollHoppie()
 	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
 	m, to := r.hoppie.lastSent()
-	if m.From != "LIRR" || m.Type != "telex" || to != "AZA1" || m.Packet != pdcNotAvailable {
+	if m.From != "LIRR" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
 		t.Fatalf("sent %v to %s", m, to)
 	}
 }
@@ -813,7 +823,7 @@ func TestPdcStaleAfterGapNotAvailable(t *testing.T) {
 	r.pollStation("LIRF")
 	expect(t, r.inbox("CODE7", "LIRF_DEL"))
 	m, to := r.hoppie.lastSent()
-	if m.From != "LIRF" || to != "AZA1" || m.Packet != pdcNotAvailable {
+	if m.From != "LIRF" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
 		t.Fatalf("sent %v to %s", m, to)
 	}
 }
@@ -900,7 +910,7 @@ func TestPdcRelayFromWrongStation(t *testing.T) {
 		r.hoppie.telex("AZA1", "LIRR", text)
 		r.pollHoppie()
 		expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
-		if m, to := r.hoppie.lastSent(); m.From != "LIRR" || to != "AZA1" || m.Packet != want {
+		if m, to := r.hoppie.lastSent(); m.From != "LIRR" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != want {
 			t.Fatalf("%q: sent %v to %s, want %q", text, m, to, want)
 		}
 	}

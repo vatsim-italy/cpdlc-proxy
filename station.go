@@ -388,7 +388,7 @@ func (st *Station) routePdc(m Message) {
 	if ok && dep != st.name && st.pdcAirports[dep] {
 		reply += ", RELAY RQST TO " + dep
 	}
-	st.telex(m.From, reply)
+	st.uplink(m.From, "", reply)
 	log.Printf("%s: PDC request from %s, %s", st.name, m.From, reply)
 }
 
@@ -471,7 +471,7 @@ func (st *Station) answerStale(m Message) bool {
 	if isPdcRequest(m) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		st.telex(m.From, pdcNotAvailable)
+		st.uplink(m.From, "", pdcNotAvailable)
 		return true
 	}
 	p, ok := parsePacket(m.Packet)

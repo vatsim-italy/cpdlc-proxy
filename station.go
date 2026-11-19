@@ -77,6 +77,7 @@ type pdcRequest struct {
 	by        string
 	min       string // the PDC's MIN as sent, its ID in the CLD header
 	confirmed bool   // CDA sent for the pilot's ROGER
+	acked     bool   // RCD RECEIVED sent
 }
 
 type Station struct {
@@ -390,9 +391,9 @@ func (st *Station) routePdc(m Message) {
 			log.Printf("%s: PDC request from %s already received", st.name, m.From)
 			return
 		}
+		// No RCD RECEIVED here: only a sector knows the flight plan is held (ackPdc).
 		if st.broadcast(m, "") {
 			st.pdcs[m.From] = &pdcRequest{at: st.now(), to: st} // once answered, a repeat is new
-			st.uplink(m.From, "", pdcReceived)
 			return
 		}
 		if td := st.topDown; td != nil {
@@ -401,7 +402,6 @@ func (st *Station) routePdc(m Message) {
 			td.mu.Unlock()
 			if delivered {
 				st.pdcs[m.From] = &pdcRequest{at: st.now(), to: td}
-				st.uplink(m.From, "", pdcReceived)
 				log.Printf("%s: PDC request from %s to top-down %s", st.name, m.From, td.name)
 				return
 			}
@@ -516,6 +516,22 @@ func (st *Station) claimPdc(sender *Station, callsign, aircraft string) (handled
 	r.to.broadcast(sent, callsign)
 	log.Printf("%s: PDC for %s sent by %s", st.name, aircraft, callsign)
 	return true, ""
+}
+
+// ackPdc sends RCD RECEIVED for a sector that holds the flight plan: once per request, and not
+// once a sector answered it. False when `sender` has no request for `aircraft` here.
+func (st *Station) ackPdc(sender *Station, aircraft string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	r := st.pdcs[aircraft]
+	if r == nil || (sender != st && sender != r.to) {
+		return false
+	}
+	if !r.acked && r.by == "" {
+		r.acked = true
+		st.uplink(aircraft, "", pdcReceived)
+	}
+	return true
 }
 
 // answerStale answers a pilot request queued during an outage instead of delivering it.

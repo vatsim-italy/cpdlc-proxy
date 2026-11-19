@@ -964,22 +964,31 @@ func (f *fakeHoppie) sentTexts(to, prefix string) int {
 	return n
 }
 
-func TestPdcAutoAckOncePerDelivery(t *testing.T) {
+// RCD RECEIVED comes from the sectors, which know whether the flight plan is held: none on
+// delivery, then one however many sectors send it.
+func TestPdcAckBySectorsOncePerRequest(t *testing.T) {
 	r := pdcRig(t)
 	r.hoppie.telex("AZA1", "LIRF", predep)
 	r.pollStation("LIRF")
+	if n := r.hoppie.sentTexts("AZA1", pdcReceived); n != 0 {
+		t.Fatalf("ack on delivery")
+	}
+	ack := "/data2/1//NE/" + pdcReceived
+	for _, s := range []struct{ logon, from string }{{"CODE7", "LIRF_DEL"}, {"CODE8", "LIRF_TWR"}} {
+		if got := r.sectorPdc(s.logon, s.from, "AZA1", ack); got != "ok" {
+			t.Fatalf("%s ack: %s", s.from, got)
+		}
+	}
 	if n := r.hoppie.sentTexts("AZA1", pdcReceived); n != 1 {
-		t.Fatalf("%d acks for one request to two sectors", n)
+		t.Fatalf("%d acks for one request from two sectors", n)
 	}
 	m, _ := r.hoppie.lastSent()
 	if p, _ := parsePacket(m.Packet); m.From != "LIRF" || p.ra != "NE" || p.text != pdcReceived {
 		t.Fatalf("ack %v", m)
 	}
-	// Refused requests get no RCD RECEIVED.
-	r.hoppie.telex("AZA2", "LIRF", "REQUEST PREDEP CLEARANCE AZA2 A320 TO LIRF AT LIMC")
-	r.pollStation("LIRF")
-	if n := r.hoppie.sentTexts("AZA2", pdcReceived); n != 0 {
-		t.Fatalf("ack to a refused request")
+	// No request, no ack.
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA2", ack); got != "error {no pdc request pending}" {
+		t.Fatalf("ack without request: %s", got)
 	}
 	// A repeat nobody answered yet: ALREADY RECEIVED, not delivered again.
 	r.inbox("CODE7", "LIRF_DEL")
@@ -989,13 +998,20 @@ func TestPdcAutoAckOncePerDelivery(t *testing.T) {
 	if m, to := r.hoppie.lastSent(); to != "AZA1" || pdcAnswer(t, m) != pdcAlready {
 		t.Fatalf("repeat: sent %v to %s", m, to)
 	}
-	// Once answered, a repeat is a new request.
+	// Once answered, a repeat is a new request; an ack after the answer is dropped.
 	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/1//R/AZA1 CLRD"); got != "ok" {
 		t.Fatalf("PDC: %s", got)
 	}
 	r.hoppie.telex("AZA1", "LIRF", predep)
 	r.pollStation("LIRF")
 	expect(t, r.inbox("CODE7", "LIRF_DEL"), predep)
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/2//NE/RCD REJECTED X"); got != "ok" {
+		t.Fatalf("reject: %s", got)
+	}
+	r.sectorPdc("CODE8", "LIRF_TWR", "AZA1", ack)
+	if n := r.hoppie.sentTexts("AZA1", pdcReceived); n != 1 {
+		t.Fatalf("ack after the answer sent")
+	}
 }
 
 func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {

@@ -225,6 +225,18 @@ func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string, pdc 
 	}
 }
 
+// ackPdc is a sector's marked RCD RECEIVED: the proxy sends it once, as the airport station
+// that has the request (the sector's own, or the one its CTR covers top-down).
+func (p *Proxy) ackPdc(st *Station, aircraft string) string {
+	for _, airport := range p.stations {
+		if (airport == st || airport.topDown == st) && airport.ackPdc(st, aircraft) {
+			p.flush(airport)
+			return "ok"
+		}
+	}
+	return "error {no pdc request pending}"
+}
+
 // send forwards an uplink as the station and returns Hoppie's own answer. A telex, or a cpdlc
 // uplink the sector marked pdc, answering a pending PDC request takes it and goes out as the
 // airport station the pilot asked, even from its top-down CTR. Unmarked cpdlc uplinks never
@@ -232,6 +244,9 @@ func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string, pdc 
 func (p *Proxy) send(st *Station, from, to, kind, pkt string, pdc bool) string {
 	if to == "" {
 		return "error {no recipient}"
+	}
+	if pk, ok := parsePacket(pkt); ok && pdc && kind == "cpdlc" && pk.text == pdcReceived {
+		return p.ackPdc(st, to)
 	}
 	as := st
 	if kind == "telex" || pdc {

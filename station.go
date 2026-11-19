@@ -14,10 +14,15 @@ import (
 )
 
 const (
-	notInUse        = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED"
-	unableNotInUse  = "UNABLE@_@CPDLC NOT IN USE. VOICE ONLY"
-	unavailable     = "CPDLC TEMPORARILY UNAVAILABLE. REVERT TO VOICE"
-	pdcNotAvailable = "PDC NOT AVAILABLE"
+	notInUse       = "CPDLC NOT IN USE. VOICE ONLY UNTIL NOTIFIED"
+	unableNotInUse = "UNABLE@_@CPDLC NOT IN USE. VOICE ONLY"
+	unavailable    = "CPDLC TEMPORARILY UNAVAILABLE. REVERT TO VOICE"
+	// PDC answers (DCL style), all CPDLC NE as the airport station.
+	pdcReceived       = "RCD RECEIVED REQUEST BEING PROCESSED STANDBY"
+	pdcRejected       = "RCD REJECTED REVERT TO VOICE PROCEDURES"
+	pdcErrorInMessage = "RCD REJECTED ERROR IN MESSAGE REVERT TO VOICE PROCEDURES"
+	pdcAlready        = "RCD REJECTED REQUEST ALREADY RECEIVED STANDBY"
+	pdcConfirmed      = "CDA RECEIVED CLEARANCE CONFIRMED"
 )
 
 const (
@@ -67,15 +72,17 @@ type outgoing struct {
 // pdcRequest is a PREDEP CLEARANCE given to every sector of a PDC station; by is the sector
 // whose telex answered it first (§14.10).
 type pdcRequest struct {
-	at time.Time
-	to *Station // whose sectors got it: the airport's own, or its top-down CTR's
-	by string
+	at        time.Time
+	to        *Station // whose sectors got it: the airport's own, or its top-down CTR's
+	by        string
+	min       string // the PDC's MIN as sent, its ID in the CLD header
+	confirmed bool   // CDA sent for the pilot's ROGER
 }
 
 type Station struct {
 	name        string
 	facility    string          // CURRENT ATC UNIT text of the proxy's own logon answer
-	pdc         bool            // its sectors answer PDC requests; otherwise the proxy answers PDC NOT AVAILABLE
+	pdc         bool            // its sectors answer PDC requests; otherwise the proxy rejects them
 	topDown     *Station        // PDC station: whose sectors answer its PDCs while none of its own is live
 	pdcAirports map[string]bool // every PDC station of the proxy, for RELAY TO
 	covers      []string        // CTR station: the PDC airports it covers top-down, for RELAY TO
@@ -300,6 +307,11 @@ func (st *Station) route(m Message, oldLogons bool) {
 	}
 	// 1. A reply goes to the sector that sent the uplink, with that sector's own MIN.
 	if ok && p.mrn != "" {
+		// The pilot's ROGER to our PDC: CDA, once.
+		if r := st.pdcs[m.From]; r != nil && r.min == p.mrn && !r.confirmed && strings.TrimSpace(p.text) == "ROGER" {
+			r.confirmed = true
+			st.uplink(m.From, "", pdcConfirmed)
+		}
 		if o, found := st.mins[m.From][p.mrn]; found {
 			reply := m
 			p.mrn = o.local
@@ -363,8 +375,9 @@ func pdcDeparture(text string) (dep string, ok bool) {
 // routePdc gives a well-formed PDC request for this station's own airport (no AT counts as
 // this airport) to every live sector of the PDC station or, with none live, of its top-down
 // CTR; they agree among themselves who answers, and claimPdc lets only the first telex
-// through. Anything else gets PDC NOT AVAILABLE, or PDC NOT AVAIL. RELAY TO @<airport>@ when
-// relayFor finds the PDC airport it belongs to. mu is held; lock order is airport, then its top-down CTR.
+// through; a repeat nobody has answered yet gets REQUEST ALREADY RECEIVED and is not delivered
+// again. Anything else is rejected (ERROR IN MESSAGE when malformed), or gets
+// PDC NOT AVAIL. RELAY TO @<airport>@ when relayFor finds the PDC airport it belongs to. mu is held; lock order is airport, then its top-down CTR.
 func (st *Station) routePdc(m Message) {
 	at, ok := pdcDeparture(m.Packet)
 	dep := at
@@ -372,9 +385,14 @@ func (st *Station) routePdc(m Message) {
 		dep = st.name
 	}
 	if ok && st.pdc && dep == st.name {
+		if r := st.pdcs[m.From]; r != nil && r.by == "" {
+			st.uplink(m.From, "", pdcAlready)
+			log.Printf("%s: PDC request from %s already received", st.name, m.From)
+			return
+		}
 		if st.broadcast(m, "") {
-			st.pdcs[m.From] = &pdcRequest{at: st.now(), to: st} // a repeat can be answered again
-			st.uplink(m.From, "", pdcReceived(st.now()))
+			st.pdcs[m.From] = &pdcRequest{at: st.now(), to: st} // once answered, a repeat is new
+			st.uplink(m.From, "", pdcReceived)
 			return
 		}
 		if td := st.topDown; td != nil {
@@ -383,14 +401,16 @@ func (st *Station) routePdc(m Message) {
 			td.mu.Unlock()
 			if delivered {
 				st.pdcs[m.From] = &pdcRequest{at: st.now(), to: td}
-				st.uplink(m.From, "", pdcReceived(st.now()))
+				st.uplink(m.From, "", pdcReceived)
 				log.Printf("%s: PDC request from %s to top-down %s", st.name, m.From, td.name)
 				return
 			}
 		}
 	}
-	reply := pdcNotAvailable
-	if relay := st.relayFor(at, ok); relay != "" {
+	reply := pdcRejected
+	if !ok {
+		reply = pdcErrorInMessage
+	} else if relay := st.relayFor(at, ok); relay != "" {
 		reply = "PDC NOT AVAIL. RELAY TO @" + relay + "@"
 	}
 	st.uplink(m.From, "", reply)
@@ -414,11 +434,21 @@ func (st *Station) relayFor(at string, ok bool) string {
 	return ""
 }
 
-// pdcReceived is the automatic answer to a delivered PDC request: once per request, from the
-// proxy, so it takes no lock and does not repeat per sector.
-func pdcReceived(now time.Time) string {
-	now = now.UTC()
-	return "DEPART MESSAGE REQUEST RECEIVED " + now.Format("1504") + "Z " + now.Format("020106") + " REQUEST BEING PROCESSED"
+// pdcHeader puts `CLD <hhmm>Z <yymmdd> <airport> PDC <MIN>` in front of a sector's PDC (RA R)
+// and remembers that MIN, so the pilot's ROGER gets its CDA.
+func (st *Station) pdcHeader(to, pkt string) string {
+	p, ok := parsePacket(pkt)
+	if !ok || p.ra != "R" {
+		return pkt
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if r := st.pdcs[to]; r != nil {
+		r.min, r.confirmed = p.min, false
+	}
+	now := st.now().UTC()
+	p.text = "CLD " + now.Format("1504") + "Z " + now.Format("060102") + " " + st.name + " PDC " + p.min + " " + p.text
+	return p.String()
 }
 
 // deliverTopDown hands a reply to the top-down CTR sector that sent this airport's PDC; mu is
@@ -493,7 +523,7 @@ func (st *Station) answerStale(m Message) bool {
 	if isPdcRequest(m) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		st.uplink(m.From, "", pdcNotAvailable)
+		st.uplink(m.From, "", pdcRejected)
 		return true
 	}
 	p, ok := parsePacket(m.Packet)

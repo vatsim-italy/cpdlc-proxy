@@ -740,14 +740,14 @@ const predep = "REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATI
 
 func TestPdcNotAvailableForAnotherAirportOrBadFormat(t *testing.T) {
 	r := pdcRig(t)
-	for _, text := range []string{
-		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIMC STAND 107 ATIS B", // not LIRF's departure
-		"REQUEST PREDEP CLEARANCE AZA1 A320 AT LIRF",                          // malformed: no TO
+	for text, want := range map[string]string{
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIBD STAND 107 ATIS B": pdcRejected,       // not LIRF's departure
+		"REQUEST PREDEP CLEARANCE AZA1 A320 AT LIRF":                          pdcErrorInMessage, // malformed: no TO
 	} {
 		r.hoppie.telex("AZA1", "LIRF", text)
 		r.pollStation("LIRF")
 		expect(t, r.inbox("CODE7", "LIRF_DEL"))
-		if m, to := r.hoppie.lastSent(); to != "AZA1" || m.Type != "cpdlc" || pdcAnswer(t, m) != pdcNotAvailable {
+		if m, to := r.hoppie.lastSent(); to != "AZA1" || m.Type != "cpdlc" || pdcAnswer(t, m) != want {
 			t.Fatalf("%q: sent %v to %s", text, m, to)
 		}
 	}
@@ -783,7 +783,7 @@ func TestPdcNotAvailableOnCtrStation(t *testing.T) {
 	r.pollHoppie()
 	expect(t, r.inbox("CODE1", "LIRR_NE1_CTR"))
 	m, to := r.hoppie.lastSent()
-	if m.From != "LIRR" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
+	if m.From != "LIRR" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcRejected {
 		t.Fatalf("sent %v to %s", m, to)
 	}
 }
@@ -824,7 +824,7 @@ func TestPdcStaleAfterGapNotAvailable(t *testing.T) {
 	r.pollStation("LIRF")
 	expect(t, r.inbox("CODE7", "LIRF_DEL"))
 	m, to := r.hoppie.lastSent()
-	if m.From != "LIRF" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
+	if m.From != "LIRF" || m.Type != "cpdlc" || to != "AZA1" || pdcAnswer(t, m) != pdcRejected {
 		t.Fatalf("sent %v to %s", m, to)
 	}
 }
@@ -906,7 +906,7 @@ func TestPdcRelayFromWrongStation(t *testing.T) {
 	for text, want := range map[string]string{
 		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A": "PDC NOT AVAIL. RELAY TO @LIRF@",
 		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC":                          "PDC NOT AVAIL. RELAY TO @LIRF@", // LIRR covers LIRF
-		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIBD":                  pdcNotAvailable, // not a PDC airport here
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIBD":                  pdcRejected,                      // not a PDC airport here
 	} {
 		r.hoppie.telex("AZA1", "LIRR", text)
 		r.pollHoppie()
@@ -918,7 +918,7 @@ func TestPdcRelayFromWrongStation(t *testing.T) {
 }
 
 // A station's first poll since the proxy started may bring hours-old messages (Hoppie has no
-// timestamps): PDC requests get PDC NOT AVAILABLE, logons are dropped.
+// timestamps): PDC requests are rejected, logons are dropped.
 func TestFirstPollBacklogIsStale(t *testing.T) {
 	r := pdcRig(t)
 	r.proxy.stations["LIRF"].pollOK = time.Time{}
@@ -926,7 +926,7 @@ func TestFirstPollBacklogIsStale(t *testing.T) {
 	r.hoppie.pilot("AZA2", "LIRF", "/data2/1//Y/REQUEST LOGON")
 	r.pollStation("LIRF")
 	expect(t, r.inbox("CODE7", "LIRF_DEL"))
-	if m, to := r.hoppie.lastSent(); to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
+	if m, to := r.hoppie.lastSent(); to != "AZA1" || pdcAnswer(t, m) != pdcRejected {
 		t.Fatalf("backlog PDC: sent %v to %s", m, to)
 	}
 	if r.sentCount() != 1 || r.proxy.stations["LIRF"].conns["AZA2"] != nil {
@@ -968,19 +968,34 @@ func TestPdcAutoAckOncePerDelivery(t *testing.T) {
 	r := pdcRig(t)
 	r.hoppie.telex("AZA1", "LIRF", predep)
 	r.pollStation("LIRF")
-	if n := r.hoppie.sentTexts("AZA1", "DEPART MESSAGE REQUEST RECEIVED"); n != 1 {
+	if n := r.hoppie.sentTexts("AZA1", pdcReceived); n != 1 {
 		t.Fatalf("%d acks for one request to two sectors", n)
 	}
 	m, _ := r.hoppie.lastSent()
-	if p, _ := parsePacket(m.Packet); m.From != "LIRF" || p.ra != "NE" || p.text != pdcReceived(r.now) {
+	if p, _ := parsePacket(m.Packet); m.From != "LIRF" || p.ra != "NE" || p.text != pdcReceived {
 		t.Fatalf("ack %v", m)
 	}
-	// Refused requests get PDC NOT AVAILABLE only.
+	// Refused requests get no RCD RECEIVED.
 	r.hoppie.telex("AZA2", "LIRF", "REQUEST PREDEP CLEARANCE AZA2 A320 TO LIRF AT LIMC")
 	r.pollStation("LIRF")
-	if n := r.hoppie.sentTexts("AZA2", "DEPART MESSAGE"); n != 0 {
+	if n := r.hoppie.sentTexts("AZA2", pdcReceived); n != 0 {
 		t.Fatalf("ack to a refused request")
 	}
+	// A repeat nobody answered yet: ALREADY RECEIVED, not delivered again.
+	r.inbox("CODE7", "LIRF_DEL")
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"))
+	if m, to := r.hoppie.lastSent(); to != "AZA1" || pdcAnswer(t, m) != pdcAlready {
+		t.Fatalf("repeat: sent %v to %s", m, to)
+	}
+	// Once answered, a repeat is a new request.
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/1//R/AZA1 CLRD"); got != "ok" {
+		t.Fatalf("PDC: %s", got)
+	}
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), predep)
 }
 
 func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {
@@ -998,6 +1013,10 @@ func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {
 	if m.From != "LIRF" || to != "AZA1" || sent.ra != "R" || sent.min == "5" {
 		t.Fatalf("PDC sent %v to %s", m, to)
 	}
+	now := r.now.UTC()
+	if header := "CLD " + now.Format("1504") + "Z " + now.Format("060102") + " LIRF PDC " + sent.min + " @AZA1@ CLRD TO @LIMC@"; sent.text != header {
+		t.Fatalf("PDC text %q, want %q", sent.text, header)
+	}
 	if got := r.sectorPdc("CODE8", "LIRF_TWR", "AZA1", "/data2/9//R/@AZA1@ CLRD"); got != "error {pdc already sent by LIRF_DEL}" {
 		t.Fatalf("second PDC: %s", got)
 	}
@@ -1007,6 +1026,15 @@ func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {
 	r.pollStation("LIRF")
 	expect(t, r.inbox("CODE7", "LIRF_DEL"), "/data2/3/5/N/ROGER")
 	expect(t, r.inbox("CODE8", "LIRF_TWR"))
+	if m, to := r.hoppie.lastSent(); to != "AZA1" || m.From != "LIRF" || pdcAnswer(t, m) != pdcConfirmed {
+		t.Fatalf("CDA: sent %v to %s", m, to)
+	}
+	// Once only.
+	r.hoppie.pilot("AZA1", "LIRF", "/data2/4/"+sent.min+"/N/ROGER")
+	r.pollStation("LIRF")
+	if n := r.hoppie.sentTexts("AZA1", pdcConfirmed); n != 1 {
+		t.Fatalf("%d CDAs", n)
+	}
 }
 
 func TestPdcMarkedWithoutRequestRefused(t *testing.T) {

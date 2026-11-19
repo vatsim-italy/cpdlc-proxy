@@ -254,7 +254,11 @@ func (p *Proxy) send(st *Station, from, to, kind, pkt string, pdc bool) string {
 		}
 	}
 	// The MIN comes from the station it goes out as, so the pilot's reply finds its sector.
-	reply, err := p.sendAs(as, to, kind, as.rewriteUplink(from, to, kind, pkt))
+	out := as.rewriteUplink(from, to, kind, pkt)
+	if pdc && kind == "cpdlc" {
+		out = as.pdcHeader(to, out)
+	}
+	reply, err := p.sendAs(as, to, kind, out)
 	if err != nil {
 		log.Printf("%s: send for %s to %s failed: %v", st.name, from, to, err)
 		return "error {hoppie unreachable}"

@@ -31,6 +31,7 @@ const (
 	fastWindow    = 180 * time.Second // T_resp: an uplink waiting for a reply keeps polling fast
 	staleAfter    = 180 * time.Second // T_resp: requests queued longer than this are stale
 	logonMaxAge   = 10 * time.Minute  // a logon possibly queued longer: its pilot has likely left
+	unknownGap    = 24 * time.Hour    // the gap before a station's first poll: treated as stale
 	pollInterval  = 40 * time.Second  // fixed, under Hoppie's 45–75 s since the proxy polls for several callsigns
 	pdcExpiry     = 30 * time.Minute  // a PDC request is forgotten after this long
 )
@@ -76,7 +77,8 @@ type Station struct {
 	facility    string          // CURRENT ATC UNIT text of the proxy's own logon answer
 	pdc         bool            // its sectors answer PDC requests; otherwise the proxy answers PDC NOT AVAILABLE
 	topDown     *Station        // PDC station: whose sectors answer its PDCs while none of its own is live
-	pdcAirports map[string]bool // every PDC station of the proxy, for RELAY RQST TO
+	pdcAirports map[string]bool // every PDC station of the proxy, for RELAY TO
+	covers      []string        // CTR station: the PDC airports it covers top-down, for RELAY TO
 	patterns    []string        // sector callsigns of this FIR
 	pollSeconds int             // > 0: fixed interval (tests, local simulator); 0: pollInterval
 	staleAfter  time.Duration
@@ -172,8 +174,10 @@ func (st *Station) upstream(ok bool) (gap time.Duration) {
 		}
 		st.failures = 0
 		now := st.now()
-		if !st.pollOK.IsZero() {
-			gap = now.Sub(st.pollOK)
+		gap = now.Sub(st.pollOK)
+		if st.pollOK.IsZero() {
+			// First poll since the proxy started: the backlog may be hours old (no timestamps).
+			gap = unknownGap
 		}
 		st.pollOK = now
 	} else {
@@ -359,10 +363,11 @@ func pdcDeparture(text string) (dep string, ok bool) {
 // routePdc gives a well-formed PDC request for this station's own airport (no AT counts as
 // this airport) to every live sector of the PDC station or, with none live, of its top-down
 // CTR; they agree among themselves who answers, and claimPdc lets only the first telex
-// through. Anything else gets PDC NOT AVAILABLE, with RELAY RQST TO when AT names another
-// PDC airport. mu is held; lock order is airport, then its top-down CTR.
+// through. Anything else gets PDC NOT AVAILABLE, or PDC NOT AVAIL. RELAY TO @<airport>@ when
+// relayFor finds the PDC airport it belongs to. mu is held; lock order is airport, then its top-down CTR.
 func (st *Station) routePdc(m Message) {
-	dep, ok := pdcDeparture(m.Packet)
+	at, ok := pdcDeparture(m.Packet)
+	dep := at
 	if dep == "" {
 		dep = st.name
 	}
@@ -385,11 +390,28 @@ func (st *Station) routePdc(m Message) {
 		}
 	}
 	reply := pdcNotAvailable
-	if ok && dep != st.name && st.pdcAirports[dep] {
-		reply += ", RELAY RQST TO " + dep
+	if relay := st.relayFor(at, ok); relay != "" {
+		reply = "PDC NOT AVAIL. RELAY TO @" + relay + "@"
 	}
 	st.uplink(m.From, "", reply)
 	log.Printf("%s: PDC request from %s, %s", st.name, m.From, reply)
+}
+
+// relayFor is the PDC airport a misdirected request should go to: its AT airport, else the one
+// this CTR covers top-down (only when it covers exactly one); "" when there is none.
+func (st *Station) relayFor(at string, ok bool) string {
+	switch {
+	case !ok:
+		return ""
+	case at != "":
+		if at != st.name && st.pdcAirports[at] {
+			return at
+		}
+		return ""
+	case len(st.covers) == 1:
+		return st.covers[0]
+	}
+	return ""
 }
 
 // pdcReceived is the automatic answer to a delivered PDC request: once per request, from the

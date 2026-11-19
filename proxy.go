@@ -100,6 +100,7 @@ func newProxy(cfg Config, logon string) *Proxy {
 		// Only airport -> CTR: a chain would break the airport-then-CTR lock order.
 		if td := p.stations[strings.ToUpper(s.TopDown)]; td != nil && st.pdc && !td.pdc {
 			st.topDown = td
+			td.covers = append(td.covers, st.name)
 		} else {
 			log.Printf("%s: top_down %q is not a CTR station of this proxy, ignored", st.name, s.TopDown)
 		}

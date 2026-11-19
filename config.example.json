@@ -3,7 +3,7 @@
   "stations": [
     { "station": "LIRR", "facility": "ROMA CTR", "sectors": ["LIRR_CTR", "LIRR_*_CTR"] },
     { "station": "LIMM", "facility": "MILANO CTR", "sectors": ["LIMM_CTR", "LIMM_*_CTR"] },
-    { "station": "LIRF", "pdc": true, "top_down": "LIRR", "sectors": ["LIRF_DEL", "LIRF_GND", "LIRF_TWR"] },
-    { "station": "LIMC", "pdc": true, "top_down": "LIMM", "sectors": ["LIMC_DEL", "LIMC_GND", "LIMC_TWR"] }
+    { "station": "LIRF", "pdc": true, "top_down": "LIRR", "sectors": ["LIRF_*", "LIRR_APP", "LIRR_*_APP"] },
+    { "station": "LIMC", "pdc": true, "top_down": "LIMM", "sectors": ["LIMC_*", "LIMM_APP", "LIMM_*_APP"] }
   ]
 }

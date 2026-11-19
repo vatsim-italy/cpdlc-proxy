@@ -105,6 +105,7 @@ func (r *rig) start(statePath string) (restored int, err error) {
 	r.proxy.now = func() time.Time { return r.now }
 	for _, st := range r.proxy.stations {
 		st.now = r.proxy.now
+		st.pollOK = r.now // as if just polled: routing tests start warm (TestFirstPollBacklogIsStale)
 	}
 	return r.proxy.load()
 }
@@ -903,8 +904,8 @@ func TestPdcTopDownToCtrWhileAirportEmpty(t *testing.T) {
 func TestPdcRelayFromWrongStation(t *testing.T) {
 	r := topDownRig(t)
 	for text, want := range map[string]string{
-		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A": pdcNotAvailable + ", RELAY RQST TO LIRF",
-		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC":                          pdcNotAvailable,
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC AT LIRF STAND 101 ATIS A": "PDC NOT AVAIL. RELAY TO @LIRF@",
+		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIMC":                          "PDC NOT AVAIL. RELAY TO @LIRF@", // LIRR covers LIRF
 		"REQUEST PREDEP CLEARANCE AZA1 A320 TO LIRF AT LIBD":                  pdcNotAvailable, // not a PDC airport here
 	} {
 		r.hoppie.telex("AZA1", "LIRR", text)
@@ -914,6 +915,27 @@ func TestPdcRelayFromWrongStation(t *testing.T) {
 			t.Fatalf("%q: sent %v to %s, want %q", text, m, to, want)
 		}
 	}
+}
+
+// A station's first poll since the proxy started may bring hours-old messages (Hoppie has no
+// timestamps): PDC requests get PDC NOT AVAILABLE, logons are dropped.
+func TestFirstPollBacklogIsStale(t *testing.T) {
+	r := pdcRig(t)
+	r.proxy.stations["LIRF"].pollOK = time.Time{}
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.hoppie.pilot("AZA2", "LIRF", "/data2/1//Y/REQUEST LOGON")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"))
+	if m, to := r.hoppie.lastSent(); to != "AZA1" || pdcAnswer(t, m) != pdcNotAvailable {
+		t.Fatalf("backlog PDC: sent %v to %s", m, to)
+	}
+	if r.sentCount() != 1 || r.proxy.stations["LIRF"].conns["AZA2"] != nil {
+		t.Fatal("backlog logon accepted")
+	}
+	// Later polls are fresh again.
+	r.hoppie.telex("AZA3", "LIRF", "REQUEST PREDEP CLEARANCE AZA3 A320 TO LIMC")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), "REQUEST PREDEP CLEARANCE AZA3 A320 TO LIMC")
 }
 
 // sectorPdc sends a cpdlc uplink marked as an answer to a PDC request, as HoppieClient does.

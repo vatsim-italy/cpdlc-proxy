@@ -245,7 +245,7 @@ func (p *Proxy) send(st *Station, from, to, kind, pkt string, pdc bool) string {
 	if to == "" {
 		return "error {no recipient}"
 	}
-	if pk, ok := parsePacket(pkt); ok && pdc && kind == "cpdlc" && pk.text == pdcReceived {
+	if pk, ok := parsePacket(pkt); ok && pdc && kind == "cpdlc" && strings.TrimPrefix(pk.text, to+" ") == pdcReceived {
 		return p.ackPdc(st, to)
 	}
 	as := st
@@ -327,14 +327,22 @@ func (p *Proxy) poll(st *Station) {
 		st.upstream(false)
 		return
 	}
-	gap, answered := st.upstream(true), 0
-	stale, oldLogons := gap > st.staleAfter, gap > logonMaxAge
+	gap, answered, dropped := st.upstream(true), 0, 0
+	stale, old := gap > st.staleAfter, gap > backlogMaxAge
 	for _, m := range messages {
+		// shortcut: no timestamps, so every PDC request after a long gap is dropped; a pilot still there asks again.
+		if old && isPdcRequest(m) {
+			dropped++
+			continue
+		}
 		if stale && st.answerStale(m) {
 			answered++
 			continue
 		}
-		st.route(m, oldLogons)
+		st.route(m, old)
+	}
+	if dropped > 0 {
+		log.Printf("%s: %d PDC requests possibly older than %v dropped", st.name, dropped, backlogMaxAge)
 	}
 	if answered > 0 {
 		log.Printf("%s: first poll after an outage, %d stale requests answered TEMPORARILY UNAVAILABLE", st.name, answered)

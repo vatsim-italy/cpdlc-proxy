@@ -35,7 +35,7 @@ const (
 	fastPoll      = 20 * time.Second
 	fastWindow    = 180 * time.Second // T_resp: an uplink waiting for a reply keeps polling fast
 	staleAfter    = 180 * time.Second // T_resp: requests queued longer than this are stale
-	logonMaxAge   = 10 * time.Minute  // a logon possibly queued longer: its pilot has likely left
+	backlogMaxAge = 10 * time.Minute  // a logon or PDC request possibly queued longer: its pilot has likely left
 	unknownGap    = 24 * time.Hour    // the gap before a station's first poll: treated as stale
 	pollInterval  = 40 * time.Second  // fixed, under Hoppie's 45–75 s since the proxy polls for several callsigns
 	pdcExpiry     = 30 * time.Minute  // a PDC request is forgotten after this long
@@ -288,7 +288,7 @@ func (st *Station) adopt(callsign, aircraft string, c *conn) {
 }
 
 // route hands a downlink to a sector, or answers it for the proxy (§14.3, §14.5);
-// oldLogons says the batch may hold logons older than logonMaxAge.
+// oldLogons says the batch may hold logons older than backlogMaxAge.
 func (st *Station) route(m Message, oldLogons bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -311,7 +311,7 @@ func (st *Station) route(m Message, oldLogons bool) {
 		// The pilot's ROGER to our PDC: CDA, once.
 		if r := st.pdcs[m.From]; r != nil && r.min == p.mrn && !r.confirmed && strings.TrimSpace(p.text) == "ROGER" {
 			r.confirmed = true
-			st.uplink(m.From, "", pdcConfirmed)
+			st.uplink(m.From, "", m.From+" "+pdcConfirmed)
 		}
 		if o, found := st.mins[m.From][p.mrn]; found {
 			reply := m
@@ -344,7 +344,7 @@ func (st *Station) route(m Message, oldLogons bool) {
 	switch {
 	case ok && c == nil && strings.HasPrefix(p.text, "REQUEST LOGON") && oldLogons:
 		// shortcut: no timestamps, so every unowned logon after a long gap is dropped; a pilot still there logs on again.
-		log.Printf("%s: no sector for %s, logon possibly older than %v dropped", st.name, m.From, logonMaxAge)
+		log.Printf("%s: no sector for %s, logon possibly older than %v dropped", st.name, m.From, backlogMaxAge)
 		return
 	case ok && c == nil && strings.HasPrefix(p.text, "REQUEST LOGON"):
 		st.acceptLogon(m.From, p.min)
@@ -387,7 +387,7 @@ func (st *Station) routePdc(m Message) {
 	}
 	if ok && st.pdc && dep == st.name {
 		if r := st.pdcs[m.From]; r != nil && r.by == "" {
-			st.uplink(m.From, "", pdcAlready)
+			st.uplink(m.From, "", m.From+" "+pdcAlready)
 			log.Printf("%s: PDC request from %s already received", st.name, m.From)
 			return
 		}
@@ -407,9 +407,9 @@ func (st *Station) routePdc(m Message) {
 			}
 		}
 	}
-	reply := pdcRejected
+	reply := m.From + " " + pdcRejected
 	if !ok {
-		reply = pdcErrorInMessage
+		reply = m.From + " " + pdcErrorInMessage
 	} else if relay := st.relayFor(at, ok); relay != "" {
 		reply = "PDC NOT AVAIL. RELAY TO @" + relay + "@"
 	}
@@ -529,7 +529,7 @@ func (st *Station) ackPdc(sender *Station, aircraft string) bool {
 	}
 	if !r.acked && r.by == "" {
 		r.acked = true
-		st.uplink(aircraft, "", pdcReceived)
+		st.uplink(aircraft, "", aircraft+" "+pdcReceived)
 	}
 	return true
 }
@@ -539,7 +539,7 @@ func (st *Station) answerStale(m Message) bool {
 	if isPdcRequest(m) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		st.uplink(m.From, "", pdcRejected)
+		st.uplink(m.From, "", m.From+" "+pdcRejected)
 		return true
 	}
 	p, ok := parsePacket(m.Packet)

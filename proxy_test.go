@@ -759,6 +759,7 @@ func TestPdcDeparture(t *testing.T) {
 		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL AT LIMC":                    "LIMC",
 		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL ATIS B":                     "",
 		"REQUEST PREDEP CLEARANCE EJU56VC A320 TO EDDL":                            "",
+		"REQUEST PREDEP CLEARANCE ITY1389 BCS3 TO LIMJ AT LIRF 410 ATIS W 08:30Z":  "LIRF",
 	} {
 		if got, ok := pdcDeparture(text); !ok || got != want {
 			t.Fatalf("%q: got %q %v, want %q", text, got, ok, want)

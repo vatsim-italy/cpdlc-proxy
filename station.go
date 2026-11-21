@@ -361,16 +361,33 @@ func isPdcRequest(m Message) bool {
 	return m.Type == "telex" && strings.Contains(strings.ToUpper(m.Packet), "PREDEP")
 }
 
-// REQUEST PREDEP CLEARANCE <CS> <TYPE> TO <DEST> [AT <DEP>] [STAND <n>] [ATIS <x>]
-var pdcFormat = regexp.MustCompile(`^REQUEST PREDEP CLEARANCE \S+ \S+ TO [A-Z]{4}(?: AT ([A-Z]{4}))?(?: STAND \S+)?(?: ATIS [A-Z])?$`)
+var icao = regexp.MustCompile(`^[A-Z]{4}$`)
 
-// pdcDeparture parses a PDC request: ok when well formed, dep its AT airport ("" without one).
+// pdcDeparture parses a PDC request: REQUEST PREDEP CLEARANCE <CS> <TYPE> TO <DEST> followed by
+// optional AT <DEP>, STAND <n>, ATIS <x> in any order; other words are ignored. ok when well
+// formed, dep its AT airport ("" without one).
 func pdcDeparture(text string) (dep string, ok bool) {
-	g := pdcFormat.FindStringSubmatch(strings.Join(strings.Fields(strings.ToUpper(text)), " "))
-	if g == nil {
+	f := strings.Fields(strings.ToUpper(text))
+	if len(f) < 7 || f[0] != "REQUEST" || f[1] != "PREDEP" || f[2] != "CLEARANCE" || f[5] != "TO" || !icao.MatchString(f[6]) {
 		return "", false
 	}
-	return g[1], true
+	for i := 7; i < len(f); i++ {
+		switch f[i] {
+		case "AT", "STAND", "ATIS":
+			if i+1 >= len(f) {
+				return "", false
+			}
+			v := f[i+1]
+			if f[i] == "AT" && !icao.MatchString(v) || f[i] == "ATIS" && (len(v) != 1 || v[0] < 'A' || v[0] > 'Z') {
+				return "", false
+			}
+			if f[i] == "AT" {
+				dep = v
+			}
+			i++
+		}
+	}
+	return dep, true
 }
 
 // routePdc gives a well-formed PDC request for this station's own airport (no AT counts as

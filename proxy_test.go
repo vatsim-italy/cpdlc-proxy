@@ -1072,6 +1072,26 @@ func TestPdcMarkedCpdlcClaimsAndRogerReturns(t *testing.T) {
 	}
 }
 
+// Regression (DLH2MP, live): ACCEPT answers a PDC like ROGER and gets the CDA.
+func TestPdcAcceptGetsCda(t *testing.T) {
+	r := pdcRig(t)
+	r.hoppie.telex("AZA1", "LIRF", predep)
+	r.pollStation("LIRF")
+	r.inbox("CODE7", "LIRF_DEL")
+	r.inbox("CODE8", "LIRF_TWR")
+	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/5//R/@AZA1@ CLRD TO @LIMC@"); got != "ok" {
+		t.Fatalf("PDC: %s", got)
+	}
+	m, _ := r.hoppie.lastSent()
+	sent, _ := parsePacket(m.Packet)
+	r.hoppie.pilot("AZA1", "LIRF", "/data2/3/"+sent.min+"/N/ACCEPT")
+	r.pollStation("LIRF")
+	expect(t, r.inbox("CODE7", "LIRF_DEL"), "/data2/3/5/N/ACCEPT")
+	if n := r.hoppie.sentTexts("AZA1", "AZA1 "+pdcConfirmed); n != 1 {
+		t.Fatalf("%d CDAs", n)
+	}
+}
+
 func TestPdcMarkedWithoutRequestRefused(t *testing.T) {
 	r := pdcRig(t)
 	if got := r.sectorPdc("CODE7", "LIRF_DEL", "AZA1", "/data2/1//R/@AZA1@ CLRD"); got != "error {no pdc request pending}" {

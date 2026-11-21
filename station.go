@@ -308,8 +308,8 @@ func (st *Station) route(m Message, oldLogons bool) {
 	}
 	// 1. A reply goes to the sector that sent the uplink, with that sector's own MIN.
 	if ok && p.mrn != "" {
-		// The pilot's ROGER to our PDC: CDA, once.
-		if r := st.pdcs[m.From]; r != nil && r.min == p.mrn && !r.confirmed && strings.TrimSpace(p.text) == "ROGER" {
+		// The pilot's ROGER (or ACCEPT, from some clients) to our PDC: CDA, once.
+		if r := st.pdcs[m.From]; r != nil && r.min == p.mrn && !r.confirmed && (strings.TrimSpace(p.text) == "ROGER" || strings.TrimSpace(p.text) == "ACCEPT") {
 			r.confirmed = true
 			st.uplink(m.From, "", m.From+" "+pdcConfirmed)
 		}

@@ -106,4 +106,4 @@ scenarios against an in-process fake Hoppie server.
 
 ## License
 
-GPL-3.0, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

@@ -1,4 +1,3 @@
-# Needs Traefik already running on the external network ${TRAEFIK_NETWORK}.
 # Values come from .env (see .env.example).
 services:
   cpdlc-proxy:
@@ -11,17 +10,17 @@ services:
       - ./config.json:/config/config.json:ro
       # Named volume, not ./data: it inherits the image's /data owner (uid 65532).
       - cpdlc-state:/data
-    networks:
-      - traefik
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.cpdlc-proxy.rule=Host(`${CPDLC_PROXY_HOST:?set CPDLC_PROXY_HOST in .env}`)
-      - traefik.http.routers.cpdlc-proxy.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
-      - traefik.http.routers.cpdlc-proxy.tls=true
-      - traefik.http.routers.cpdlc-proxy.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
-      - traefik.http.routers.cpdlc-proxy.service=cpdlc-proxy
-      - traefik.http.services.cpdlc-proxy.loadbalancer.server.port=8080
-      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+    # networks:
+    #   - traefik
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.http.routers.cpdlc-proxy.rule=Host(`${CPDLC_PROXY_HOST:?set CPDLC_PROXY_HOST in .env}`)
+    #   - traefik.http.routers.cpdlc-proxy.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+    #   - traefik.http.routers.cpdlc-proxy.tls=true
+    #   - traefik.http.routers.cpdlc-proxy.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+    #   - traefik.http.routers.cpdlc-proxy.service=cpdlc-proxy
+    #   - traefik.http.services.cpdlc-proxy.loadbalancer.server.port=8080
+    #   - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
     logging:
       driver: json-file
       options:
@@ -31,7 +30,7 @@ services:
 volumes:
   cpdlc-state:
 
-networks:
-  traefik:
-    name: ${TRAEFIK_NETWORK:-traefik}
-    external: true
+# networks:
+#   traefik:
+#     name: ${TRAEFIK_NETWORK:-traefik}
+#     external: true

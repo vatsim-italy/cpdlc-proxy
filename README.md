@@ -11,7 +11,7 @@ A client needs more than a changed Hoppie URL to work with it: see the
 clients don't work as they are.
 
 The container serves plain HTTP on port 8080. Put a TLS-terminating reverse
-proxy (the compose file uses Traefik) in front of it: logon codes cross the
+proxy in front of it: logon codes cross the
 wire, so do not expose the port directly.
 
 ## Image
@@ -25,8 +25,6 @@ settings) or `docker login ghcr.io` on the server with a token that has
 
 ## Deploy
 
-Needs Docker with Compose v2 and Traefik already running on a Docker network.
-Only three files live on the server: `docker-compose.yml`, `config.json`, `.env`.
 
 1. Copy `docker-compose.yml`, `config.example.json` and `.env.example` to the server.
 2. `cp config.example.json config.json`, then edit `stations`: one entry per FIR
@@ -37,8 +35,6 @@ Only three files live on the server: `docker-compose.yml`, `config.json`, `.env`
 3. `cp .env.example .env`, then fill in:
    - `HOPPIE_LOGON`: the proxy's own Hoppie logon code.
    - `CPDLC_PROXY_HOST`: the public host name (DNS must point to the server).
-   - `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERTRESOLVER`: match
-     your Traefik setup (`docker network ls`, Traefik's static config).
    - `CPDLC_PROXY_TAG`: `latest`, or a branch name to run a branch's image.
 4. If you build your own image, change the image owner in `docker-compose.yml`.
 5. `docker compose up -d`
@@ -58,7 +54,7 @@ Each controller keeps their own Hoppie logon code; the proxy only checks it.
   "stale_seconds": 180,
   "stations": [
     { "station": "LIRR", "facility": "ROMA CTR", "sectors": ["LIRR_CTR", "LIRR_*_CTR"] },
-    { "station": "LIRF", "pdc": true, "top_down": "LIRR", "sectors": ["LIRF_*", "LIRR_APP"] }
+    { "station": "LIRF", "pdc": true, "top_down": "LIRR", "sectors": ["LIRF_*", "LIRR_*_APP"] }
   ]
 }
 ```

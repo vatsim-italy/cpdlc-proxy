@@ -31,7 +31,7 @@ Contents:
 ## 1. What the proxy does
 
 Without the proxy, every sector logs on to Hoppie with its own station callsign
-(`LIRR_N_CTR`, or a short code). A pilot must log on again at every sector
+(`MWS2`, LIMM_WS2_CTR). A pilot must log on again at every sector
 change, and two sectors can never share a station: Hoppie hands each message to
 whoever polls first, and locks a polled callsign to one logon code for 100 s.
 
@@ -467,46 +467,37 @@ point at the proxy unchanged. They can't: the proxy is Hoppie-compatible on the
 wire, but sharing a station needs information and behaviour that a plain Hoppie
 client neither sends nor expects.
 
-1. **They log on as the station, not as the controller.** A client logs on as
-   `LIRR` (or a short sector code) and puts that in `from`. The proxy needs the
-   controller callsign to know which sector is asking. `LIRR` matches no sector
-   pattern and is refused. Adding `LIRR` as a pattern doesn't help: every
-   controller would then be the same sector, with one shared inbox, and the
-   first one to poll would get every message, exactly the problem the proxy
-   solves. Controllers with different codes would also lock each other out
-   with `callsign already in use`.
-
-2. **They don't say which flights they own.** Without `assumed`, the proxy has
+1. **They don't say which flights they own.** Without `assumed`, the proxy has
    no owner or next sector for any aircraft. Only replies to that client's own
    uplinks reach it (rule 1 of §7). Every new logon is accepted by the proxy
    itself and parked as voice only, and every pilot request gets the automatic
    UNABLE. The controller never sees them.
 
-3. **They poll too slowly.** Hoppie asks clients to poll every 45–75 s. The
+2. **They poll too slowly.** Hoppie asks clients to poll every 45–75 s. The
    proxy considers a sector gone after 30 s of silence, so such a client is
    offline most of the time: messages for it are routed elsewhere or answered
    by the proxy, and 30 s later its flights are parked.
 
-4. **They don't understand the proxy's notices.** A flight transferred to them
+3. **They don't understand the proxy's notices.** A flight transferred to them
    inside the FIR arrives with `{CS vcp {CONNECTED AUTH}}` instead of a logon.
    A plain client ignores an unknown message type, so it believes the aircraft
    is not connected: it can't send it anything, and treats its messages as
    coming from an unconnected aircraft.
 
-5. **They hand over between sectors.** A plain client transfers with
+4. **They hand over between sectors.** A plain client transfers with
    `HANDOVER` and expects the pilot to log off and log on to the next unit.
    Inside a proxied FIR the next unit is the same station, so the handover
    breaks the connection the proxy is trying to keep; and once the proxy sees a
    `HANDOVER` it stops parking the flight and waits for a logoff.
 
-6. **PDC needs the `pdc=1` marker.** Without it a CPDLC clearance is an
+5. **PDC needs the `pdc=1` marker.** Without it a CPDLC clearance is an
    ordinary uplink: no `CLD` header, no race between sectors, no
    `CDA RECEIVED CLEARANCE CONFIRMED`, and from a top-down CTR it goes out as
    the CTR station instead of the airport the pilot asked. Telex answers do
    take part in the race, but other sectors' `PDC SENT BY` notices are still
    ignored, so several controllers may prepare the same clearance.
 
-7. **New error replies.** Replies such as `error {proxy busy, retry}`,
+6. **New error replies.** Replies such as `error {proxy busy, retry}`,
    `error {hoppie unreachable}` or `error {pdc already sent by …}` are normal
    operating conditions on the proxy. A plain client may show them as fatal
    errors or disconnect.

@@ -101,7 +101,7 @@ Split a packet on its first five `/` only: the text may contain `/`.
 | The same reply twice, or a repeated `REQUEST LOGON` | Handle every transition idempotently |
 | Requests without `@`: `REQUEST DIRECT TO FIX ARTIP` | Classify on the plain text |
 | Requests with RA `N` | Still answer them |
-| A logon queued many hours ago | Check the flight is online before accepting it |
+| A logon delivered hours after it was sent (seen: 21 h) | Messages have no timestamp, so its age can't be known. Accept a logon only for a flight that is online now with a flight plan; otherwise answer `UNABLE LOGON, REVERT TO VOICE` (§7). This filters out pilots who have left; an old logon from a pilot who is still online is accepted like a new one |
 
 ### Rules for uplinks
 
@@ -274,7 +274,13 @@ PDC requests (telex containing `PREDEP`) follow their own rules (§11).
 
 Logons routed to a sector are that sector's to accept or reject: the proxy does
 not see flight plans. A client should accept only a flight that is online with
-a flight plan, and send `LOGOFF` otherwise.
+a flight plan, and otherwise answer the logon's MIN with
+`UNABLE LOGON, REVERT TO VOICE` (RA `NE`).
+
+The proxy's own filter on old logons is coarser: after a Hoppie gap longer
+than 10 min it drops logons no sector owns or expects (§10); otherwise it
+accepts them without any check, since it can't see who is online. The
+flight plan check then happens when a sector adopts the flight (§8).
 
 ## 8. Transfers inside the FIR
 
@@ -451,7 +457,9 @@ Messages:
       HANDOVER and LOGOFF.
 - [ ] Inside the FIR: `CONTACT` only, then release. Between FIRs: `CONTACT`,
       `HANDOVER`.
-- [ ] Accept a logon only for an online flight with a flight plan.
+- [ ] Accept a logon only for an online flight with a flight plan; otherwise
+      answer `UNABLE LOGON, REVERT TO VOICE`.
+- [ ] On `CONNECTED …` for a flight without a flight plan, send `LOGOFF`.
 
 PDC (if the client serves airports):
 

@@ -1,6 +1,6 @@
 package main
 
-// Hoppie wire format (docs/cpdlc.md §1, §2).
+// Hoppie wire format (docs/developer-guide.md §2).
 
 import (
 	"fmt"

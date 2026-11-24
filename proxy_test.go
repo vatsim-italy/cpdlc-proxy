@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// fakeHoppie is tools/hoppie-sim/server.py in Go, with a set of valid logon codes.
+// fakeHoppie is a fake Hoppie server, with a set of valid logon codes.
 type fakeHoppie struct {
 	mu     sync.Mutex
 	valid  map[string]bool

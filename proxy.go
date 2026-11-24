@@ -1,6 +1,6 @@
 package main
 
-// Hoppie-compatible endpoint for sectors (docs/cpdlc.md §14.1, §14.2).
+// Hoppie-compatible endpoint for sectors (docs/developer-guide.md §3).
 
 import (
 	"context"
@@ -22,7 +22,7 @@ const (
 type Config struct {
 	HoppieURL   string          `json:"hoppie_url"`
 	PollSeconds int             `json:"poll_seconds"`  // > 0 only for tests and the local simulator
-	StaleSecs   int             `json:"stale_seconds"` // 0: 180 (T_resp)
+	StaleSecs   int             `json:"stale_seconds"` // 0: 180
 	Stations    []StationConfig `json:"stations"`
 }
 
@@ -117,7 +117,7 @@ func (p *Proxy) stationFor(callsign string) *Station {
 	return nil
 }
 
-// checkLogon pings Hoppie with the sector's own code, cached per (code, callsign) (§14.2).
+// checkLogon pings Hoppie with the sector's own code, cached per (code, callsign) (docs/developer-guide.md §3).
 // It returns the error reply for the sector, or "" when the code is good.
 // A network failure is not a bad code.
 func (p *Proxy) checkLogon(logon, callsign string) string {
@@ -188,8 +188,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(reply))
 }
 
-// assumed is set when a poll carries the sector's flights (docs/cpdlc.md §14.3); pdc marks a
-// sector's answer to a PDC request (§14.10).
+// assumed is set when a poll carries the sector's flights (docs/developer-guide.md §4); pdc marks a
+// sector's answer to a PDC request (docs/developer-guide.md §11).
 func (p *Proxy) handle(assumed []string, logon, from, to, kind, pkt string, pdc bool) string {
 	st := p.stationFor(from)
 	if st == nil {

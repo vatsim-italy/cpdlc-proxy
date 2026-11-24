@@ -1,6 +1,6 @@
 package main
 
-// Proxy state on disk, so a restart resumes where it was (docs/cpdlc.md §14.6).
+// Proxy state on disk, so a restart resumes where it was (docs/developer-guide.md §10).
 // Inboxes, sector liveness and owner/next tables are left out: sectors resend them on every poll.
 
 import (

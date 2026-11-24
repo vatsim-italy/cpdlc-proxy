@@ -1,4 +1,4 @@
-// cpdlc-proxy shares one Hoppie station per FIR between its sectors (docs/cpdlc.md §14).
+// cpdlc-proxy shares one Hoppie station per FIR between its sectors (docs/developer-guide.md).
 //
 //	HOPPIE_LOGON=<proxy's own code> cpdlc-proxy -config config.json -listen :8080
 package main

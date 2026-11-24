@@ -1,6 +1,6 @@
 package main
 
-// One Hoppie station shared by the sectors of a FIR (docs/cpdlc.md §14.3–§14.5).
+// One Hoppie station shared by the sectors of a FIR (docs/developer-guide.md §4–§9).
 
 import (
 	"log"
@@ -33,8 +33,8 @@ const (
 	parkedExit    = 30 * time.Minute // parked without a tracker inside the FIR: it left
 	connForget    = 24 * time.Hour
 	fastPoll      = 20 * time.Second
-	fastWindow    = 180 * time.Second // T_resp: an uplink waiting for a reply keeps polling fast
-	staleAfter    = 180 * time.Second // T_resp: requests queued longer than this are stale
+	fastWindow    = 180 * time.Second // an uplink waiting for a reply keeps polling fast
+	staleAfter    = 180 * time.Second // requests queued longer than this are stale
 	backlogMaxAge = 10 * time.Minute  // a logon or PDC request possibly queued longer: its pilot has likely left
 	unknownGap    = 24 * time.Hour    // the gap before a station's first poll: treated as stale
 	pollInterval  = 40 * time.Second  // fixed, under Hoppie's 45–75 s since the proxy polls for several callsigns
@@ -54,7 +54,7 @@ type origin struct {
 	at     time.Time
 }
 
-// conn is a CPDLC connection to the station, inferred from the traffic (§14.5).
+// conn is a CPDLC connection to the station, inferred from the traffic (docs/developer-guide.md §6).
 type conn struct {
 	authorized, parked bool
 	handedOver         bool // HANDOVER to another station: wait for the pilot's LOGOFF, never park
@@ -70,7 +70,7 @@ type outgoing struct {
 }
 
 // pdcRequest is a PREDEP CLEARANCE given to every sector of a PDC station; by is the sector
-// whose telex answered it first (§14.10).
+// whose telex answered it first (docs/developer-guide.md §11).
 type pdcRequest struct {
 	at        time.Time
 	to        *Station // whose sectors got it: the airport's own, or its top-down CTR's
@@ -287,7 +287,7 @@ func (st *Station) adopt(callsign, aircraft string, c *conn) {
 	log.Printf("%s: %s adopts %s, %s", st.name, callsign, aircraft, state)
 }
 
-// route hands a downlink to a sector, or answers it for the proxy (§14.3, §14.5);
+// route hands a downlink to a sector, or answers it for the proxy (docs/developer-guide.md §7, §8);
 // oldLogons says the batch may hold logons older than backlogMaxAge.
 func (st *Station) route(m Message, oldLogons bool) {
 	st.mu.Lock()
@@ -584,7 +584,7 @@ func (st *Station) acceptLogon(aircraft, min string) {
 }
 
 func (st *Station) park(aircraft string, c *conn) {
-	if c.authorized { // already told NOT IN USE (e.g. below the floor): don't repeat it
+	if c.authorized { // already told NOT IN USE (e.g. by its sector): don't repeat it
 		st.uplink(aircraft, "", notInUse)
 	}
 	c.authorized, c.parked, c.parkedAt = false, true, st.now()

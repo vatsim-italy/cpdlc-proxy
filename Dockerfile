@@ -1,4 +1,4 @@
-# Built by .github/workflows/cpdlc-proxy-image.yml; locally: docker build -t cpdlc-proxy:latest .
+# Built by .github/workflows/image.yml; locally: docker build -t cpdlc-proxy:latest .
 # Cross-compiles on the build machine's platform: no emulation for the arm64 image.
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
 ARG TARGETOS TARGETARCH

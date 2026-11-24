@@ -2,7 +2,7 @@
 # Values come from .env (see .env.example).
 services:
   cpdlc-proxy:
-    # Built by .github/workflows/cpdlc-proxy-image.yml on every change to tools/cpdlc-proxy/.
+    # Built by .github/workflows/image.yml on every push.
     image: ghcr.io/vatsim-italy/cpdlc-proxy:${CPDLC_PROXY_TAG:-latest}
     restart: unless-stopped
     environment:
